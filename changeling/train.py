@@ -57,8 +57,11 @@ def train(config, resume=None):
         c1 = full_eval(env, unravel(theta), n=config["eval_n"], seed=config["seed"])
         _log(out, dict(gen=-1, condition="c1_random_init", **_flat(c1)))
 
+    from .rollout import FITNESS
     gen_step = make_gen_step(env, unravel, config["pop"],
-                             config["n_lifetimes"], config["sigma"], config["lr"])
+                             config["n_lifetimes"], config["sigma"],
+                             config["lr"],
+                             fitness_fn=FITNESS[config.get("fitness", "late")])
     print(f"env={env['name']} dim={theta.shape[0]} pop={config['pop']} "
           f"M={config['n_lifetimes']} T={env['T']}")
 

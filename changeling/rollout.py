@@ -50,3 +50,14 @@ def late_weighted_fitness(rewards):
     T = rewards.shape[0]
     w = jnp.linspace(0.5, 1.5, T)
     return jnp.sum(w * rewards) / jnp.sum(w)
+
+
+def q4_fitness(rewards):
+    """Final-quarter reward only: early steps are fitness-free, so
+    exploration costs nothing. Anti-settling repricing (exploratory;
+    not the locked P0 gate fitness)."""
+    T = rewards.shape[0]
+    return rewards[-(T // 4):].mean()
+
+
+FITNESS = {"late": late_weighted_fitness, "q4": q4_fitness}

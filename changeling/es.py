@@ -31,7 +31,8 @@ def adam_ascend(theta, grad, st, lr, b1=0.9, b2=0.999, eps=1e-8):
     return theta, dict(m=m, v=v, t=t)
 
 
-def make_gen_step(env, unravel, pop, n_lifetimes, sigma, lr):
+def make_gen_step(env, unravel, pop, n_lifetimes, sigma, lr,
+                  fitness_fn=late_weighted_fitness):
     """Returns jitted (theta, adam_state, key) -> (theta', adam_state', stats)."""
     assert pop % 2 == 0
 
@@ -40,7 +41,7 @@ def make_gen_step(env, unravel, pop, n_lifetimes, sigma, lr):
 
         def one(task, k):
             rewards, _, _ = rollout(env, params, task, k)
-            return late_weighted_fitness(rewards)
+            return fitness_fn(rewards)
 
         return jax.vmap(one)(tasks, roll_keys).mean()
 

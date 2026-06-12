@@ -16,11 +16,17 @@ import jax.numpy as jnp
 from . import OBS_DIM
 
 
-def bandit_env(n_arms=8, lifetime=200):
-    """Bernoulli bandit, p_i ~ U(0,1) per lifetime. One-step episodes."""
+def bandit_env(n_arms=8, lifetime=200, needle=False):
+    """Bernoulli bandit. Default: p_i ~ U(0,1) per lifetime (forgiving —
+    second-best is typically close to best, so satisficing nearly pays).
+    needle=True: one arm at 0.9, the rest at 0.1 — finding the needle is
+    constitutive of success; settling pays 0.1. One-step episodes."""
     assert 2 <= n_arms <= 8
 
     def sample_task(key):
+        if needle:
+            pos = jax.random.randint(key, (), 0, n_arms)
+            return jnp.where(jnp.arange(n_arms) == pos, 0.9, 0.1)
         return jax.random.uniform(key, (n_arms,))
 
     def reset(key, task):
