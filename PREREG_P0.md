@@ -58,4 +58,15 @@ beyond locked hypers (e.g., M>8) would be deviations and must be logged here fir
 
 ## Deviations log (append-only)
 
-- none
+- **D1 (2026-06-12) — G0-A recalibrated from absolute to reference-relative.**
+  The locked bar (final-quarter best-arm rate ≥ 0.85) was set without computing a
+  feasibility ceiling. Agent-independent reference simulation
+  (`scripts/reference_bandit.py`: Thompson sampling, Beta(1,1) priors, 4000 lifetimes,
+  exact gate task distribution and horizon) yields **0.747**; UCB1 yields 0.404. The
+  0.85 bar exceeds what near-optimal play achieves — a broken gate, checkable without
+  reference to any agent. G0-A becomes: **final-quarter best-arm rate ≥ 0.90 × Thompson
+  reference = 0.672** (the RL² Gittins-relative convention). Bias acknowledged: this
+  deviation was written after observing agent values (ES 0.248, R2 0.540); mitigations:
+  the reference computation never sees the agent, the 90% fraction follows literature
+  convention rather than fitting our numbers, and the recalibrated bar does NOT pass the
+  current best agent. Slope, C4, C5, G0-D unchanged.
