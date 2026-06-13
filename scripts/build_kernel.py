@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parent.parent
 PKG = ROOT / "changeling"
 ORDER = ["__init__.py", "envs.py", "agent.py", "rollout.py", "es.py",
          "evaluate.py", "train.py", "ppo.py"]
-INTRA = re.compile(r"^from \.\S* import |^from \. import ")
+INTRA = re.compile(r"^\s*from \.\S* import |^\s*from \. import ")
 
 MAIN = '''
 

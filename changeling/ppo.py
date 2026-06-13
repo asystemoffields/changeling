@@ -2,8 +2,14 @@
 
 Whole lifetimes are the trajectories; BPTT through the full lifetime; value
 function does NOT reset at episode boundaries (the objective is lifetime
-return). Training rewards carry the same late-weighting as R1 fitness
-(PREREG_P0: selection pressure identical across routes); eval is untouched.
+return). Training rewards carry the same late-weight w_t as R1 fitness, but the
+selection pressures are NOT identical: R1 ranks the undiscounted weighted-average
+fitness sum(w_t·r_t)/sum(w_t), whereas here w_t enters the per-step reward and is
+then reshaped by the γ-discounted GAE — the effective per-step weight is γ^t·w_t,
+which for γ=0.99 over T=200 tilts EARLY, the reverse of R1's late tilt. This is a
+DECLARED confounder of the R1-vs-R2 slope comparison (PREREG_P0 D3), to be
+controlled in the Phase-1 route-scaling protocol; it does not affect any
+single-route eval (eval is untouched and uses raw rewards).
 
 The deploy artifact is params["gru"] — the same pure S1 substrate as R1.
 The value head exists only at training time (a connector, in SPEC terms).
@@ -22,7 +28,7 @@ from .agent import gru_step, init_gru, hidden_size
 from .es import adam_init, adam_ascend
 from .envs import ENVS
 from .evaluate import full_eval
-from .train import save_ckpt, load_ckpt, _flat, _log
+from .train import save_ckpt, load_ckpt, _flat, _log, assert_resume_cfg, assert_pure_gate
 
 
 def init_ppo_params(key, hidden=128):
@@ -144,20 +150,23 @@ def train_ppo(config, resume=None):
     # differ from the training distribution (e.g. mixture curricula)
     eval_env = ENVS[config["env"]](**config.get("eval_env_kwargs",
                                                 config.get("env_kwargs", {})))
+    assert_pure_gate(config, eval_env)
+    print(f"R2 grades gate on eval_env={eval_env['name']} "
+          f"kwargs={config.get('eval_env_kwargs', config.get('env_kwargs', {}))}")
 
     if resume:
-        theta, adam_state, key, start_up, saved_cfg = load_ckpt(resume)
-        for k in ("env", "hidden", "n_lifetimes", "lr"):
-            assert saved_cfg[k] == config[k], f"resume config mismatch on {k}"
+        theta, adam_state, key, start_up, saved_cfg, best_gate = load_ckpt(resume)
+        assert_resume_cfg(saved_cfg, config)
         _, unravel = ravel_pytree(
             init_ppo_params(jax.random.PRNGKey(0), config["hidden"]))
-        print(f"resumed update={start_up} from {resume}")
+        print(f"resumed update={start_up} from {resume} (best_gate={best_gate:.3f})")
     else:
         key = jax.random.PRNGKey(config["seed"])
         key, ki = jax.random.split(key)
         theta, unravel = ravel_pytree(init_ppo_params(ki, config["hidden"]))
         adam_state = adam_init(theta.shape[0])
         start_up = 0
+        best_gate = -1.0
 
     batch_collect, epoch_step = make_update_step(env, unravel, config)
     print(f"R2 PPO env={env['name']} dim={theta.shape[0]} "
@@ -166,12 +175,12 @@ def train_ppo(config, resume=None):
     max_seconds = config.get("max_seconds")
     stop_gate = config.get("stop_gate")
     stop_slope_pos = config.get("stop_slope_pos", False)
-    best_gate = -1.0
 
     t0 = time.time()
     for up in range(start_up, config["updates"]):
         if max_seconds is not None and time.time() - t0 > max_seconds:
-            save_ckpt(out / "ckpt.npz", theta, adam_state, key, up, config)
+            save_ckpt(out / "ckpt.npz", theta, adam_state, key, up, config,
+                      best_gate=best_gate)
             print(f"wall-clock budget reached at update {up}; exiting")
             break
         key, kc = jax.random.split(key)
@@ -195,14 +204,16 @@ def train_ppo(config, resume=None):
             if ev["main"]["gate_q4"] > best_gate:
                 best_gate = ev["main"]["gate_q4"]
                 save_ckpt(out / "ckpt_best.npz", theta, adam_state, key,
-                          up + 1, config)
+                          up + 1, config, best_gate=best_gate)
                 print(f"  new best gate_q4={best_gate:.3f} -> ckpt_best.npz")
             if (stop_gate is not None and ev["main"]["gate_q4"] >= stop_gate
                     and (not stop_slope_pos or ev["main"]["slope"] > 0)):
-                save_ckpt(out / "ckpt.npz", theta, adam_state, key, up + 1, config)
+                save_ckpt(out / "ckpt.npz", theta, adam_state, key, up + 1, config,
+                          best_gate=best_gate)
                 print(f"stop criterion reached at update {up}; exiting")
                 break
         if (up + 1) % config["ckpt_every"] == 0 or up + 1 == config["updates"]:
-            save_ckpt(out / "ckpt.npz", theta, adam_state, key, up + 1, config)
+            save_ckpt(out / "ckpt.npz", theta, adam_state, key, up + 1, config,
+                      best_gate=best_gate)
 
     return theta, unravel

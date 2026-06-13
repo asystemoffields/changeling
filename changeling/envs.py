@@ -44,9 +44,12 @@ def bandit_env(n_arms=8, lifetime=200, needle=False, mix=0.0):
         return (), jnp.zeros(OBS_DIM)
 
     def step(state, a, key, task):
-        a_eff = a % n_arms  # surplus interface actions wrap onto real arms
-        r = jax.random.bernoulli(key, task[a_eff]).astype(jnp.float32)
-        metric = (a_eff == jnp.argmax(task)).astype(jnp.float32)
+        valid = a < n_arms                      # SPEC §2: surplus actions = no-op
+        a_eff = jnp.where(valid, a, 0)          # safe gather index when invalid
+        pull = jax.random.bernoulli(key, task[a_eff]).astype(jnp.float32)
+        r = jnp.where(valid, pull, 0.0)         # a no-op earns nothing
+        best = (a_eff == jnp.argmax(task)).astype(jnp.float32)
+        metric = jnp.where(valid, best, 0.0)    # and never counts as best-arm
         return (), jnp.zeros(OBS_DIM), r, jnp.bool_(True), metric
 
     return dict(sample_task=sample_task, reset=reset, step=step,

@@ -7,7 +7,10 @@ lifetime; env auto-resets on done (same task). Controls (PREREG_P0):
        input channel (last action/reward) still flows — C5 bounds the
        non-recurrent component, not memory absolutely.
   c6 — full amnesia: C5 plus zeroed last-action/last-reward inputs; nothing
-       carries across steps. Performance must be exactly chance-level.
+       carries across steps through the RL² channels. On memory-dependent envs
+       (bandit: obs is constant) performance is chance-level; on envs solvable
+       from the current observation (catch: obs carries the board) C6 stays near
+       main — it ablates the RL² channels, not the agent's reactivity.
 """
 import jax
 import jax.numpy as jnp

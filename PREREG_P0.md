@@ -92,3 +92,51 @@ joins the control suite from Phase 1.
   Logged before the gate-scale run. Note: this converts G0-A from pure reproduction
   into a miniature of the project thesis — training-distribution breadth buying
   held-out performance.
+
+- **D3 (2026-06-12) — "identical selection pressure across routes" retracted; ES/PPO
+  objective mismatch declared a route-comparison confounder.** The late-weight
+  w_t = linspace(0.5,1.5,T) was intended to apply equal "select-for-improvement"
+  pressure to both routes. It does not. R1 (ES) ranks the *undiscounted*
+  whole-lifetime fitness sum(w_t·r_t)/sum(w_t), so the effective per-step weight is
+  w_t (monotone increasing, late-tilted). R2 (PPO) bakes w_t into the *per-step*
+  reward, which the γ=0.99 / λ=0.95 GAE then reshapes; the effective per-step weight
+  on the start-state objective is γ^t·w_t, which over T=200 *decreases* 0.50→0.20 —
+  the reverse temporal profile. The two routes therefore optimize materially
+  different objectives, so the R1-vs-R2 comparison along the slope endpoint (SPEC
+  §1b-1) is confounded: a route's apparent slope advantage may reflect objective
+  alignment, not intrinsic in-context-learning quality. This does **not** affect any
+  single-route gate number (eval is untouched, raw-reward, unweighted) and does not
+  change any Gate-0 criterion. Action, deferred to the Phase-1 route-scaling protocol:
+  match the effective temporal profiles (e.g. set PPO γ→1 on the lifetime, or grade
+  ES on a γ-matched fitness), log γ^t·w_t alongside the ES profile, and treat the
+  route decision as confounded until reconciled. Surfaced by the pre-Phase-1
+  adversarial harness review (triangulated by 3 independent reviewers).
+
+- **Harness hardening (2026-06-12, post-lock adversarial review — criteria unchanged).**
+  A fan-out bug-hunt over the Phase-0 harness (6 dimensions × 3-lens verification +
+  completeness critic) confirmed 13 findings; all fixed or documented. None changes a
+  locked Gate-0 criterion or the n_arms=8 gate semantics. Bug fixes: (a) `eval_ckpt.py`
+  no longer imposes slope>0 on catch (G0-D waives it; old behaviour FAILed every
+  converged catcher); (b) PPO/ES resume now persists & restores `best_gate` and guards
+  the `ckpt_best` overwrite (a resume could previously clobber the run's honest max);
+  (c) resume now asserts the full objective-determining config (γ, λ, clip, coefs,
+  reward_scale, env_kwargs, eval_env_kwargs, seed, fitness) — previously only a subset,
+  letting a resume silently optimize a different problem; (d) a non-uniform training
+  distribution now *requires* a pure-gate `eval_env_kwargs` (assert), closing a latent
+  false-PASS path; (e) the ES route grades its in-loop eval/early-stop on a separate
+  pure-gate `eval_env` (mirrors PPO; was grading on the training env); (f) ES antithetic
+  CRN now shares rollout randomness across the population so the dominant Bernoulli-reward
+  noise cancels in F+−F− (was sharing only task params); (g) surplus interface actions
+  map to no-op per SPEC §2 (was wrapping a%n_arms; identity at the n_arms=8 gate); (h) a
+  latent kernel-build bug (indented intra-import surviving the stripper → ES-kernel
+  ImportError) fixed. **The G0-A verdict was re-scored under the patched code and
+  reproduced 0.6216 exactly.**
+
+## Gate 0 outcome (2026-06-12)
+
+**G0-A PARK** (gate_q4 0.622 ≤ 0.63; within-lifetime slope, C4/C6 controls, and catch
+all green). PARK carries a falsifiable scale prediction: hidden-size sweep {128,256,512}
+crosses the 0.672 bar at hidden ≈ 256–512, run as the first rung of the Phase-1
+route-scaling protocol. **G0-B/C/D/E PASS.** Full verdict: `reports/gate0.md`. Phase 0
+closes; Phase 1 (interface randomization) is next, its prereg to be locked before its
+first metered run.

@@ -72,9 +72,15 @@ def main():
               f"{ev['c6_full_amnesia']['gate_q4']:6.3f}")
 
     gmean = float(np.mean(gates))
+    # G0-D (catch) explicitly WAIVES the within-lifetime slope requirement; only
+    # bandit (G0-A) requires slope>0. Imposing slope>0 on catch FAILs every
+    # converged catcher (q1==q4 reward -> slope is exactly 0).
+    slope_required = envname == "bandit"
+    slope_ok = all(x > 0 for x in slopes) if slope_required else True
+    note = "" if slope_required else "  (catch: slope not required — G0-D)"
     print(f"\nmean gate_q4 = {gmean:.4f}  (bar {bar})  "
-          f"slope>0 all seeds: {all(x > 0 for x in slopes)}")
-    verdict = "PASS" if gmean >= bar and all(x > 0 for x in slopes) else "FAIL"
+          f"slope>0 all seeds: {all(x > 0 for x in slopes)}{note}")
+    verdict = "PASS" if gmean >= bar and slope_ok else "FAIL"
     print(f"G0 verdict: {verdict}")
     return gmean, verdict
 

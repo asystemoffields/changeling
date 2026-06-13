@@ -1,7 +1,9 @@
 """Route R1: OpenES, written out in full (no evosax — PREREG_P0 amendment).
 
 Mirrored sampling, centered-rank fitness shaping, Adam ascent. Common task
-seeds across the population each generation (CRN variance reduction).
+seeds AND rollout randomness across the population each generation (full
+antithetic CRN: mirror pairs differ only in theta, so the dominant noise term
+— the Bernoulli reward draws — cancels in F+ - F-).
 """
 from functools import partial
 
@@ -51,9 +53,10 @@ def make_gen_step(env, unravel, pop, n_lifetimes, sigma, lr,
         eps = jax.random.normal(ke, (pop // 2, dim))
         thetas = jnp.concatenate([theta + sigma * eps, theta - sigma * eps])
         tasks = jax.vmap(env["sample_task"])(jax.random.split(kt, n_lifetimes))
-        roll_keys = jax.random.split(kr, pop * n_lifetimes).reshape(
-            pop, n_lifetimes, -1)
-        fits = jax.vmap(member_fitness, in_axes=(0, None, 0))(
+        # shared across the population (hence across each antithetic pair): the
+        # only difference between F+ and F- is then the theta perturbation
+        roll_keys = jax.random.split(kr, n_lifetimes)
+        fits = jax.vmap(member_fitness, in_axes=(0, None, None))(
             thetas, tasks, roll_keys)
         shaped = centered_ranks(fits)
         grad = jnp.concatenate([eps, -eps]).T @ shaped / (pop * sigma)

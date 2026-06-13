@@ -11,9 +11,10 @@ from .agent import init_gru
 from .es import adam_init, flatten_params, make_gen_step
 from .evaluate import full_eval
 from .envs import ENVS
+from .rollout import FITNESS
 
 
-def save_ckpt(path, theta, adam_state, key, gen, config):
+def save_ckpt(path, theta, adam_state, key, gen, config, best_gate=-1.0):
     np.savez(
         path,
         theta=np.asarray(theta),
@@ -23,6 +24,7 @@ def save_ckpt(path, theta, adam_state, key, gen, config):
         key=np.asarray(key),
         gen=gen,
         config=json.dumps(config),
+        best_gate=np.float32(best_gate),
     )
 
 
@@ -30,22 +32,59 @@ def load_ckpt(path):
     z = np.load(path, allow_pickle=False)
     adam_state = dict(m=jnp.asarray(z["adam_m"]), v=jnp.asarray(z["adam_v"]),
                       t=jnp.int32(z["adam_t"]))
+    # best_gate persisted since the resume-clobbers-ckpt_best fix; default for
+    # checkpoints written before it (back-compat with existing npz).
+    best_gate = float(z["best_gate"]) if "best_gate" in z.files else -1.0
     return (jnp.asarray(z["theta"]), adam_state, jnp.asarray(z["key"]),
-            int(z["gen"]), json.loads(str(z["config"])))
+            int(z["gen"]), json.loads(str(z["config"])), best_gate)
+
+
+# Keys allowed to differ across a resume: survivability / logging cadence knobs
+# that do NOT define the objective or training distribution. Everything else must
+# match the saved config, or the resume silently optimizes a different problem
+# from the saved theta (and the next ckpt overwrites the provenance).
+_RESUME_FREE = {"max_seconds", "stop_gate", "stop_slope_pos", "updates", "gens",
+                "out", "log_every", "eval_every", "ckpt_every"}
+
+
+def assert_resume_cfg(saved_cfg, config):
+    for k in config:
+        if k in _RESUME_FREE:
+            continue
+        assert saved_cfg.get(k) == config[k], (
+            f"resume config mismatch on {k!r}: saved={saved_cfg.get(k)!r} "
+            f"new={config[k]!r} (objective-determining keys must match)")
+
+
+def assert_pure_gate(config, eval_env):
+    """If the training distribution is non-uniform (a curriculum: mix>0 or
+    needle), the eval/gate env MUST be the pure gate task — otherwise gate_q4 is
+    silently graded on an easier distribution (inflation, possible false PASS)."""
+    ek = config.get("env_kwargs", {})
+    if ek.get("mix", 0) > 0 or ek.get("needle", False):
+        eek = config.get("eval_env_kwargs", None)
+        assert (eek is not None and eek.get("mix", 0) == 0
+                and not eek.get("needle", False)), (
+            f"training distribution is non-uniform (env_kwargs={ek}) but "
+            f"eval_env_kwargs={eek} is not the pure gate task")
 
 
 def train(config, resume=None):
     out = Path(config["out"])
     out.mkdir(parents=True, exist_ok=True)
     env = ENVS[config["env"]](**config.get("env_kwargs", {}))
+    # eval/gate listens to the pure gate task, which may differ from a curriculum
+    # training distribution (mirrors ppo.py so ES grades correctly under mix>0).
+    eval_env = ENVS[config["env"]](**config.get("eval_env_kwargs",
+                                                config.get("env_kwargs", {})))
+    assert_pure_gate(config, eval_env)
 
     if resume:
-        theta, adam_state, key, start_gen, saved_cfg = load_ckpt(resume)
-        for k in ("env", "hidden", "pop", "sigma", "lr", "n_lifetimes"):
-            assert saved_cfg[k] == config[k], f"resume config mismatch on {k}"
+        theta, adam_state, key, start_gen, saved_cfg, best_gate = load_ckpt(resume)
+        assert_resume_cfg(saved_cfg, config)
         _, unravel = flatten_params(
             init_gru(jax.random.PRNGKey(0), hidden=config["hidden"]))
-        print(f"resumed gen={start_gen} from {resume}")
+        print(f"resumed gen={start_gen} from {resume} (best_gate={best_gate:.3f})")
     else:
         key = jax.random.PRNGKey(config["seed"])
         key, ki = jax.random.split(key)
@@ -53,17 +92,19 @@ def train(config, resume=None):
         theta, unravel = flatten_params(params)
         adam_state = adam_init(theta.shape[0])
         start_gen = 0
+        best_gate = -1.0
         # C1 control: the random-init agent's eval, logged once up front
-        c1 = full_eval(env, unravel(theta), n=config["eval_n"], seed=config["seed"])
+        c1 = full_eval(eval_env, unravel(theta), n=config["eval_n"], seed=config["seed"])
         _log(out, dict(gen=-1, condition="c1_random_init", **_flat(c1)))
 
-    from .rollout import FITNESS
     gen_step = make_gen_step(env, unravel, config["pop"],
                              config["n_lifetimes"], config["sigma"],
                              config["lr"],
                              fitness_fn=FITNESS[config.get("fitness", "late")])
     print(f"env={env['name']} dim={theta.shape[0]} pop={config['pop']} "
           f"M={config['n_lifetimes']} T={env['T']}")
+    print(f"R1 grades gate on eval_env={eval_env['name']} "
+          f"kwargs={config.get('eval_env_kwargs', config.get('env_kwargs', {}))}")
 
     # survivability knobs (both optional, json-safe):
     #   max_seconds    — exit cleanly (checkpoint saved) before a session cap
@@ -76,7 +117,8 @@ def train(config, resume=None):
     t0 = time.time()
     for gen in range(start_gen, config["gens"]):
         if max_seconds is not None and time.time() - t0 > max_seconds:
-            save_ckpt(out / "ckpt.npz", theta, adam_state, key, gen, config)
+            save_ckpt(out / "ckpt.npz", theta, adam_state, key, gen, config,
+                      best_gate=best_gate)
             print(f"wall-clock budget reached at gen {gen}; checkpointed, exiting")
             break
         key, kg = jax.random.split(key)
@@ -87,19 +129,26 @@ def train(config, resume=None):
             _log(out, row)
             print(row)
         if (gen + 1) % config["eval_every"] == 0 or gen + 1 == config["gens"]:
-            ev = full_eval(env, unravel(theta), n=config["eval_n"],
+            ev = full_eval(eval_env, unravel(theta), n=config["eval_n"],
                            seed=config["seed"])
             _log(out, dict(gen=gen, **_flat(ev)))
             print(f"  eval g{gen}: main={ev['main']} "
                   f"c4={ev['c4_coin_reward']['gate_q4']:.3f} "
                   f"c5={ev['c5_no_memory']['gate_q4']:.3f}")
+            if ev["main"]["gate_q4"] > best_gate:
+                best_gate = ev["main"]["gate_q4"]
+                save_ckpt(out / "ckpt_best.npz", theta, adam_state, key,
+                          gen + 1, config, best_gate=best_gate)
+                print(f"  new best gate_q4={best_gate:.3f} -> ckpt_best.npz")
             if (stop_gate is not None and ev["main"]["gate_q4"] >= stop_gate
                     and (not stop_slope_pos or ev["main"]["slope"] > 0)):
-                save_ckpt(out / "ckpt.npz", theta, adam_state, key, gen + 1, config)
+                save_ckpt(out / "ckpt.npz", theta, adam_state, key, gen + 1, config,
+                          best_gate=best_gate)
                 print(f"stop criterion reached at gen {gen}; checkpointed, exiting")
                 break
         if (gen + 1) % config["ckpt_every"] == 0 or gen + 1 == config["gens"]:
-            save_ckpt(out / "ckpt.npz", theta, adam_state, key, gen + 1, config)
+            save_ckpt(out / "ckpt.npz", theta, adam_state, key, gen + 1, config,
+                      best_gate=best_gate)
 
     return theta, unravel
 
