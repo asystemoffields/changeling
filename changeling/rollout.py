@@ -25,13 +25,23 @@ from .looped import make_step
 _LEGACY_STEP = make_step({})
 
 
-def rollout(env, params, task, key, c4=False, c5=False, c6=False, step=None):
+def rollout(env, params, task, key, c4=False, c5=False, c6=False, step=None,
+            iface=None):
     """Returns (rewards, metrics, dones, e_ks) arrays of shape (T,). `e_ks` is the
     per-step E[K] micro-turn count (all-ones on the legacy/loop=False substrate);
     it is the K-collapse observable and feeds the ES ponder cost. `step` is a B1
-    step_fn from looped.make_step; None -> the legacy gru path."""
+    step_fn from looped.make_step; None -> the legacy gru path.
+
+    `iface` (B2) is a per-lifetime interface (P, perm) held FIXED across the
+    lifetime: the obs is projected `P @ obs` before the agent sees it, and the
+    agent's raw slot `a` reaches the env as `perm[a]` (the agent still remembers
+    its RAW action via the RL² channel). iface=None ⇒ no projection/permutation,
+    byte-identical to the pre-B2 harness; an identity interface (P=I, perm=id) is
+    a mathematical no-op."""
     if step is None:
         step = _LEGACY_STEP
+    if iface is not None:
+        P, perm = iface
     if c6:
         c5 = True
     T = env["T"]
@@ -47,10 +57,12 @@ def rollout(env, params, task, key, c4=False, c5=False, c6=False, step=None):
         r_in = jax.random.bernoulli(kc4, 0.5).astype(jnp.float32) if c4 else last_r
         if c6:
             last_a, r_in = jnp.zeros_like(last_a), jnp.float32(0.0)
-        x = jnp.concatenate([obs, last_a, jnp.array([r_in, boundary])])
+        obs_in = P @ obs if iface is not None else obs
+        x = jnp.concatenate([obs_in, last_a, jnp.array([r_in, boundary])])
         h, sample_score, _logp_all, _v, aux = step(params, h, x)
         a = jax.random.categorical(ka, sample_score)
-        state, obs, r, done, metric = env["step"](state, a, kr, task)
+        a_env = perm[a] if iface is not None else a
+        state, obs, r, done, metric = env["step"](state, a_env, kr, task)
         # auto-reset on episode end, same task
         rs_state, rs_obs = env["reset"](kres, task)
         state = jax.tree_util.tree_map(

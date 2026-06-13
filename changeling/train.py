@@ -9,6 +9,7 @@ import numpy as np
 
 from .agent import init_gru
 from .looped import init_looped, make_step
+from .interface import make_iface_fn
 from .es import adam_init, flatten_params, make_gen_step
 from .evaluate import full_eval
 from .envs import ENVS
@@ -90,6 +91,8 @@ def train(config, resume=None):
 
     step = make_step(config)
     ponder_cost = config.get("ponder_cost", 0.0)
+    iface_fn = make_iface_fn(config, for_eval=False)        # B2 train interfaces
+    eval_iface_fn = make_iface_fn(config, for_eval=True)    # held-out eval interfaces
 
     if resume:
         theta, adam_state, key, start_gen, saved_cfg, best_gate = load_ckpt(resume)
@@ -107,14 +110,14 @@ def train(config, resume=None):
         best_gate = -1.0
         # C1 control: the random-init agent's eval, logged once up front
         c1 = full_eval(eval_env, unravel(theta), n=config["eval_n"],
-                       seed=config["seed"], step=step)
+                       seed=config["seed"], step=step, iface_fn=eval_iface_fn)
         _log(out, dict(gen=-1, condition="c1_random_init", **_flat(c1)))
 
     gen_step = make_gen_step(env, unravel, config["pop"],
                              config["n_lifetimes"], config["sigma"],
                              config["lr"],
                              fitness_fn=FITNESS[config.get("fitness", "late")],
-                             step=step, ponder_cost=ponder_cost)
+                             step=step, ponder_cost=ponder_cost, iface_fn=iface_fn)
     print(f"env={env['name']} dim={theta.shape[0]} pop={config['pop']} "
           f"M={config['n_lifetimes']} T={env['T']}")
     print(f"R1 grades gate on eval_env={eval_env['name']} "
@@ -144,7 +147,7 @@ def train(config, resume=None):
             print(row)
         if (gen + 1) % config["eval_every"] == 0 or gen + 1 == config["gens"]:
             ev = full_eval(eval_env, unravel(theta), n=config["eval_n"],
-                           seed=config["seed"], step=step)
+                           seed=config["seed"], step=step, iface_fn=eval_iface_fn)
             _log(out, dict(gen=gen, **_flat(ev)))
             print(f"  eval g{gen}: main={ev['main']} "
                   f"c4={ev['c4_coin_reward']['gate_q4']:.3f} "

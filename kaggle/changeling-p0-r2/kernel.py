@@ -101,7 +101,65 @@ def catch_env(episodes=32):
                 T=episodes * (ROWS - 1), name="catch")
 
 
-ENVS = {"bandit": bandit_env, "catch": catch_env}
+def cbandit_env(n_arms=8, lifetime=256, C_ctx=5, frozen_rule=True, rule_seed=0,
+                mix=0.0, hi_std=0.8, lo_std=0.2, hi_needle=0.95, lo_needle=0.05):
+    """Contextual bandit (PREREG_P1 §1, the PRIMARY env). Each one-step trial
+    draws a context c ~ U{0..C-1}; obs = onehot(c) padded to OBS_DIM. The correct
+    arm is an injective map y(c): C->K (C_ctx<=n_arms). Pulling y(c) pays `hi`,
+    else `lo`; the curriculum mixes a sharp "needle" margin (0.95/0.05) w.p. `mix`
+    else standard (0.8/0.2). metric = pulled-correct-arm (the gate statistic).
+
+    Two modes (PREREG_P1 B3):
+      frozen_rule=True  (cbandit-FR, HEADLINE) — y is FIXED, seeded once from
+        `rule_seed`, SHARED across every lifetime and eval. The only per-lifetime
+        unknown is the interface (P,π) applied in rollout: the within-lifetime
+        slope is pure interface-inference speed.
+      frozen_rule=False (cbandit-FG, co-gated) — y resampled per lifetime ⇒
+        genuine in-context task-learning under randomization.
+
+    The env is interface-AGNOSTIC: obs-projection P and action-permutation π are
+    applied by rollout/collect (B2). step() scores whatever arm it receives, so
+    the metric is computed on the post-permutation arm (what was actually pulled).
+    """
+    assert 2 <= n_arms <= N_ACT
+    assert 2 <= C_ctx <= n_arms          # injective map needs C <= K
+    assert C_ctx <= OBS_DIM
+
+    def _rule(key):
+        # injective C->K: first C entries of a random arm permutation
+        return jax.random.permutation(key, n_arms)[:C_ctx]
+
+    Y_FIXED = _rule(jax.random.PRNGKey(rule_seed))   # FR closure constant
+
+    def sample_task(key):
+        ky, kn = jax.random.split(key)
+        y = Y_FIXED if frozen_rule else _rule(ky)
+        needle = jax.random.bernoulli(kn, mix)
+        hi = jnp.where(needle, hi_needle, hi_std)
+        lo = jnp.where(needle, lo_needle, lo_std)
+        return dict(y=y, hi=hi, lo=lo)
+
+    def reset(key, task):
+        c = jax.random.randint(key, (), 0, C_ctx)
+        obs = jnp.zeros(OBS_DIM).at[c].set(1.0)
+        return c, obs
+
+    def step(state, a, key, task):
+        c = state
+        valid = a < n_arms                       # SPEC §2: surplus actions = no-op
+        a_eff = jnp.where(valid, a, 0)
+        is_correct = jnp.logical_and(valid, a_eff == task["y"][c])
+        p = jnp.where(is_correct, task["hi"], task["lo"])
+        r = jnp.where(valid, jax.random.bernoulli(key, p).astype(jnp.float32), 0.0)
+        metric = is_correct.astype(jnp.float32)
+        # one-step episode (done every trial); rollout auto-resets a new context
+        return c, jnp.zeros(OBS_DIM), r, jnp.bool_(True), metric
+
+    return dict(sample_task=sample_task, reset=reset, step=step,
+                T=lifetime, name=f"cbandit{'FR' if frozen_rule else 'FG'}")
+
+
+ENVS = {"bandit": bandit_env, "catch": catch_env, "cbandit": cbandit_env}
 
 # ===== changeling/agent.py =====
 """S1 substrate: plain GRU, pure JAX. Params are a flat dict pytree."""
@@ -260,6 +318,131 @@ def make_step(cfg):
 
 # ----------------------------------------------------------------------------
 
+# ===== changeling/interface.py =====
+"""B2 (PREREG_P1 §1 "Randomization family"): per-lifetime interface randomization.
+
+Each lifetime is handed a FIXED, INVERTIBLE interface (P, perm), resampled every
+lifetime, and the agent must re-infer it in-context. The interface is applied by
+rollout/collect — this module only SAMPLES it (pure, keyed):
+
+  P    — orthogonal obs projection (OBS_DIM x OBS_DIM), applied as P @ obs.
+         expm-orthogonal (train family): P(alpha)=expm(alpha·A), A skew-symmetric
+         ⇒ orthogonal for all alpha, EXACTLY I at alpha=0 (reproduces P0), norm-
+         preserving (no reward-magnitude leak), kappa=1 always. `PROJ_C` is
+         calibrated (calibrate_c) so the mean self-correlation diag(P)≈0 at alpha=1.
+         signed-perm (held-out T-family, eval-only): P = D·Pi (Pi permutation,
+         D=diag(±1)) — structurally disjoint from the dense-rotation train family,
+         proves general interface-inference (G1-G). alpha=0 ⇒ I.
+  perm — action permutation in S_{N_ACT}: identity w.p.(1−alpha) else uniform.
+         Agent slot a -> env slot perm[a]; alpha=0 ⇒ identity (no-op).
+
+alpha=0 ⇒ (I, identity): a mathematical no-op, so an alpha=0 lifetime is identical
+to the un-randomized P0 protocol. Single-axis arms (G1-C/D, C7-P/π) come from
+alpha_obs / alpha_act overrides (set the other axis to 0).
+"""
+import jax
+import jax.numpy as jnp
+from jax.scipy.linalg import expm
+
+
+# Calibrated 2026-06-13 (calibrate_c, n=64, batch=512): c≈1.94 drives the expected
+# mean self-correlation E[mean_i P[i,i]] to ≈0 at alpha=1 (fully decorrelated
+# projection). Re-run calibrate_c if OBS_DIM changes. This is the §4 projection-c
+# smoke result (un-metered).
+PROJ_C = 1.94
+
+
+def _skew(key, n, c):
+    """Skew-symmetric generator A = c·(G−Gᵀ)/√(2n) (PREREG_P1 §1)."""
+    g = jax.random.normal(key, (n, n))
+    return c * (g - g.T) / jnp.sqrt(2.0 * n)
+
+
+def sample_obs_proj(key, alpha, n=OBS_DIM, proj_family="expm-orthogonal", c=PROJ_C):
+    """Orthogonal obs projection P (n x n). alpha=0 ⇒ I for both families."""
+    if proj_family == "expm-orthogonal":
+        return expm(alpha * _skew(key, n, c))
+    if proj_family == "signed-perm":
+        kp, ks = jax.random.split(key)
+        perm = jax.random.permutation(kp, n)
+        signs = jnp.where(jax.random.bernoulli(ks, 0.5, (n,)), 1.0, -1.0)
+        pi = jnp.eye(n)[perm]                      # permutation matrix
+        p_full = signs[:, None] * pi               # D·Pi (rows signed)
+        # discrete family: used at eval alpha=1; alpha=0 ⇒ exact identity
+        return jnp.where(alpha > 0, p_full, jnp.eye(n))
+    raise ValueError(f"unknown proj_family {proj_family!r}")
+
+
+def sample_act_perm(key, alpha, n=N_ACT):
+    """Action permutation. identity w.p.(1−alpha) else uniform ∈ S_n. alpha=0 ⇒ id."""
+    ku, kb = jax.random.split(key)
+    perm = jax.random.permutation(ku, n)
+    use = jax.random.bernoulli(kb, alpha)
+    return jnp.where(use, perm, jnp.arange(n))
+
+
+def sample_interface(key, alpha, proj_family="expm-orthogonal", n_obs=OBS_DIM,
+                     n_act=N_ACT, c=PROJ_C, alpha_obs=None, alpha_act=None):
+    """Per-lifetime interface (P, perm). Pure in key. alpha_obs/alpha_act override
+    the shared alpha to isolate a single axis (e.g. alpha_act=0 ⇒ P-only)."""
+    a_obs = alpha if alpha_obs is None else alpha_obs
+    a_act = alpha if alpha_act is None else alpha_act
+    kp, ka = jax.random.split(key)
+    P = sample_obs_proj(kp, a_obs, n_obs, proj_family, c)
+    perm = sample_act_perm(ka, a_act, n_act)
+    return P, perm
+
+
+def identity_interface(n_obs=OBS_DIM, n_act=N_ACT):
+    """The explicit no-op interface (P=I, perm=identity)."""
+    return jnp.eye(n_obs), jnp.arange(n_act)
+
+
+# Disjoint fold for interface keys: keeps interface sampling OFF the existing
+# task/rollout split streams, so alpha=None runs reproduce the pre-B2 harness
+# bit-for-bit, and eval interfaces stay disjoint from training.
+IFACE_FOLD = 0x1FACE
+
+
+def make_iface_fn(config, for_eval=False):
+    """Build a per-lifetime interface sampler iface_fn(key) -> (P, perm) from a
+    run config, or None when interface randomization is off (config['alpha'] is
+    None) — in which case the whole harness takes the byte-identical no-iface path.
+    For eval, `proj_family` may be overridden by `eval_proj_family` (the held-out
+    T-family, G1-G). Single-axis arms via `alpha_obs`/`alpha_act`."""
+    import functools
+    alpha = config.get("alpha")
+    if alpha is None:
+        return None
+    fam = config.get("proj_family", "expm-orthogonal")
+    if for_eval:
+        fam = config.get("eval_proj_family", fam)
+    return functools.partial(
+        sample_interface, alpha=float(alpha), proj_family=fam,
+        c=float(config.get("projection_c", PROJ_C)),
+        alpha_obs=config.get("alpha_obs"), alpha_act=config.get("alpha_act"))
+
+
+def calibrate_c(key, n=OBS_DIM, batch=512, lo=0.1, hi=12.0, iters=40):
+    """Bisection on c so the expected mean self-correlation E[mean_i P[i,i]] ≈ 0 at
+    alpha=1 (decorrelated projection). diag(P)=corr(P·eᵢ,eᵢ) since P orthogonal.
+    Monotone-decreasing in c over the useful range. Returns the calibrated c."""
+    keys = jax.random.split(key, batch)
+
+    def mean_diag(c):
+        Ps = jax.vmap(lambda k: expm(_skew(k, n, c)))(keys)
+        return jnp.mean(jax.vmap(jnp.diag)(Ps))     # E[mean_i P[i,i]]
+
+    lo, hi = jnp.float32(lo), jnp.float32(hi)
+    for _ in range(iters):
+        mid = 0.5 * (lo + hi)
+        lo, hi = jax.lax.cond(mean_diag(mid) > 0.0,
+                              lambda: (mid, hi), lambda: (lo, mid))
+    return float(0.5 * (lo + hi))
+
+
+# ----------------------------------------------------------------------------
+
 # ===== changeling/rollout.py =====
 """One lifetime: RL^2 protocol. Memory persists across episodes within a
 lifetime; env auto-resets on done (same task). Controls (PREREG_P0):
@@ -285,13 +468,23 @@ import jax.numpy as jnp
 _LEGACY_STEP = make_step({})
 
 
-def rollout(env, params, task, key, c4=False, c5=False, c6=False, step=None):
+def rollout(env, params, task, key, c4=False, c5=False, c6=False, step=None,
+            iface=None):
     """Returns (rewards, metrics, dones, e_ks) arrays of shape (T,). `e_ks` is the
     per-step E[K] micro-turn count (all-ones on the legacy/loop=False substrate);
     it is the K-collapse observable and feeds the ES ponder cost. `step` is a B1
-    step_fn from looped.make_step; None -> the legacy gru path."""
+    step_fn from looped.make_step; None -> the legacy gru path.
+
+    `iface` (B2) is a per-lifetime interface (P, perm) held FIXED across the
+    lifetime: the obs is projected `P @ obs` before the agent sees it, and the
+    agent's raw slot `a` reaches the env as `perm[a]` (the agent still remembers
+    its RAW action via the RL² channel). iface=None ⇒ no projection/permutation,
+    byte-identical to the pre-B2 harness; an identity interface (P=I, perm=id) is
+    a mathematical no-op."""
     if step is None:
         step = _LEGACY_STEP
+    if iface is not None:
+        P, perm = iface
     if c6:
         c5 = True
     T = env["T"]
@@ -307,10 +500,12 @@ def rollout(env, params, task, key, c4=False, c5=False, c6=False, step=None):
         r_in = jax.random.bernoulli(kc4, 0.5).astype(jnp.float32) if c4 else last_r
         if c6:
             last_a, r_in = jnp.zeros_like(last_a), jnp.float32(0.0)
-        x = jnp.concatenate([obs, last_a, jnp.array([r_in, boundary])])
+        obs_in = P @ obs if iface is not None else obs
+        x = jnp.concatenate([obs_in, last_a, jnp.array([r_in, boundary])])
         h, sample_score, _logp_all, _v, aux = step(params, h, x)
         a = jax.random.categorical(ka, sample_score)
-        state, obs, r, done, metric = env["step"](state, a, kr, task)
+        a_env = perm[a] if iface is not None else a
+        state, obs, r, done, metric = env["step"](state, a_env, kr, task)
         # auto-reset on episode end, same task
         rs_state, rs_obs = env["reset"](kres, task)
         state = jax.tree_util.tree_map(
@@ -381,25 +576,40 @@ def adam_ascend(theta, grad, st, lr, b1=0.9, b2=0.999, eps=1e-8):
 
 
 def make_gen_step(env, unravel, pop, n_lifetimes, sigma, lr,
-                  fitness_fn=late_weighted_fitness, step=None, ponder_cost=0.0):
+                  fitness_fn=late_weighted_fitness, step=None, ponder_cost=0.0,
+                  iface_fn=None):
     """Returns jitted (theta, adam_state, key) -> (theta', adam_state', stats).
 
     `step` is a B1 step_fn (looped.make_step); None -> legacy gru. `ponder_cost`
     is the −c·mean_t E[K] compute tax folded into ES fitness (the adaptive-K
     pressure). ponder_cost=0.0 + legacy step keeps member_fitness bitwise-identical
-    to the pre-B1 harness (e_k≡1, and f − 0.0·1.0 == f), so G0-A reproduces."""
+    to the pre-B1 harness (e_k≡1, and f − 0.0·1.0 == f), so G0-A reproduces.
+
+    `iface_fn` (B2) samples a per-lifetime interface (P, perm); None -> no
+    randomization (byte-identical). Interfaces are drawn once per generation from a
+    DISJOINT fold and SHARED across the population — so each antithetic mirror pair
+    still differs only in theta (CRN intact), and the interface-key stream never
+    perturbs the eps/task/roll splits (alpha=None reproduces G0-A exactly)."""
     assert pop % 2 == 0
 
-    def member_fitness(theta_flat, tasks, roll_keys):
+    def member_fitness(theta_flat, tasks, roll_keys, ifaces):
         params = unravel(theta_flat)
 
-        def one(task, k):
-            rewards, _, _, e_ks = rollout(env, params, task, k, step=step)
+        def one(task, k, iface):
+            rewards, _, _, e_ks = rollout(env, params, task, k, step=step,
+                                          iface=iface)
             return fitness_fn(rewards) - ponder_cost * e_ks.mean()
 
-        return jax.vmap(one)(tasks, roll_keys).mean()
+        if iface_fn is None:
+            return jax.vmap(lambda t, k: one(t, k, None))(tasks, roll_keys).mean()
+        return jax.vmap(one)(tasks, roll_keys, ifaces).mean()
 
     def gen_step(theta, adam_state, key):
+        # interface keys from a disjoint fold (does NOT consume the split below)
+        ifaces = None
+        if iface_fn is not None:
+            ik = jax.random.split(jax.random.fold_in(key, IFACE_FOLD), n_lifetimes)
+            ifaces = jax.vmap(iface_fn)(ik)
         key, ke, kt, kr = jax.random.split(key, 4)
         dim = theta.shape[0]
         eps = jax.random.normal(ke, (pop // 2, dim))
@@ -408,8 +618,8 @@ def make_gen_step(env, unravel, pop, n_lifetimes, sigma, lr,
         # shared across the population (hence across each antithetic pair): the
         # only difference between F+ and F- is then the theta perturbation
         roll_keys = jax.random.split(kr, n_lifetimes)
-        fits = jax.vmap(member_fitness, in_axes=(0, None, None))(
-            thetas, tasks, roll_keys)
+        fits = jax.vmap(member_fitness, in_axes=(0, None, None, None))(
+            thetas, tasks, roll_keys, ifaces)
         shaped = centered_ranks(fits)
         grad = jnp.concatenate([eps, -eps]).T @ shaped / (pop * sigma)
         theta, adam_state = adam_ascend(theta, grad, adam_state, lr)
@@ -440,16 +650,27 @@ import jax.numpy as jnp
 EVAL_FOLD = 10_000_000
 
 
-def eval_suite(env, params, n=100, seed=0, c4=False, c5=False, c6=False, step=None):
+def eval_suite(env, params, n=100, seed=0, c4=False, c5=False, c6=False, step=None,
+               iface_fn=None):
     key = jax.random.fold_in(jax.random.PRNGKey(seed), EVAL_FOLD)
     kt, kr = jax.random.split(key)
     tasks = jax.vmap(env["sample_task"])(jax.random.split(kt, n))
     keys = jax.random.split(kr, n)
 
-    def one(task, k):
-        return rollout(env, params, task, k, c4=c4, c5=c5, c6=c6, step=step)
+    if iface_fn is None:
+        def one(task, k):
+            return rollout(env, params, task, k, c4=c4, c5=c5, c6=c6, step=step)
+        rewards, metrics, dones, e_ks = jax.vmap(one)(tasks, keys)
+    else:
+        # NOVEL held-out interfaces: drawn from EVAL_FOLD ∘ IFACE_FOLD, disjoint
+        # from training interfaces (train keys ∘ IFACE_FOLD). Does not touch kt/kr.
+        ik = jax.random.split(jax.random.fold_in(key, IFACE_FOLD), n)
+        ifaces = jax.vmap(iface_fn)(ik)
 
-    rewards, metrics, dones, e_ks = jax.vmap(one)(tasks, keys)  # (n, T)
+        def one(task, k, iface):
+            return rollout(env, params, task, k, c4=c4, c5=c5, c6=c6, step=step,
+                           iface=iface)
+        rewards, metrics, dones, e_ks = jax.vmap(one)(tasks, keys, ifaces)
     T = rewards.shape[1]
     q = T // 4
     q1, q4 = rewards[:, :q], rewards[:, -q:]
@@ -483,14 +704,20 @@ def _binom_tail(k, n):
     return sum(comb(n, i) for i in range(k, n + 1)) / 2 ** n
 
 
-def full_eval(env, params, n=100, seed=0, step=None):
+def full_eval(env, params, n=100, seed=0, step=None, iface_fn=None):
     """Main condition plus PREREG controls. `step` is a B1 step_fn (looped path);
-    None grades the legacy gru substrate."""
+    None grades the legacy gru substrate. `iface_fn` (B2) grades under NOVEL
+    held-out interfaces; None grades the un-randomized (α=0-equivalent) protocol.
+    All conditions share the same held-out interface draw so controls are
+    comparable to main."""
     return dict(
-        main=eval_suite(env, params, n, seed, step=step),
-        c4_coin_reward=eval_suite(env, params, n, seed, c4=True, step=step),
-        c5_no_memory=eval_suite(env, params, n, seed, c5=True, step=step),
-        c6_full_amnesia=eval_suite(env, params, n, seed, c6=True, step=step),
+        main=eval_suite(env, params, n, seed, step=step, iface_fn=iface_fn),
+        c4_coin_reward=eval_suite(env, params, n, seed, c4=True, step=step,
+                                  iface_fn=iface_fn),
+        c5_no_memory=eval_suite(env, params, n, seed, c5=True, step=step,
+                                iface_fn=iface_fn),
+        c6_full_amnesia=eval_suite(env, params, n, seed, c6=True, step=step,
+                                   iface_fn=iface_fn),
     )
 
 # ===== changeling/train.py =====
@@ -580,6 +807,8 @@ def train(config, resume=None):
 
     step = make_step(config)
     ponder_cost = config.get("ponder_cost", 0.0)
+    iface_fn = make_iface_fn(config, for_eval=False)        # B2 train interfaces
+    eval_iface_fn = make_iface_fn(config, for_eval=True)    # held-out eval interfaces
 
     if resume:
         theta, adam_state, key, start_gen, saved_cfg, best_gate = load_ckpt(resume)
@@ -597,14 +826,14 @@ def train(config, resume=None):
         best_gate = -1.0
         # C1 control: the random-init agent's eval, logged once up front
         c1 = full_eval(eval_env, unravel(theta), n=config["eval_n"],
-                       seed=config["seed"], step=step)
+                       seed=config["seed"], step=step, iface_fn=eval_iface_fn)
         _log(out, dict(gen=-1, condition="c1_random_init", **_flat(c1)))
 
     gen_step = make_gen_step(env, unravel, config["pop"],
                              config["n_lifetimes"], config["sigma"],
                              config["lr"],
                              fitness_fn=FITNESS[config.get("fitness", "late")],
-                             step=step, ponder_cost=ponder_cost)
+                             step=step, ponder_cost=ponder_cost, iface_fn=iface_fn)
     print(f"env={env['name']} dim={theta.shape[0]} pop={config['pop']} "
           f"M={config['n_lifetimes']} T={env['T']}")
     print(f"R1 grades gate on eval_env={eval_env['name']} "
@@ -634,7 +863,7 @@ def train(config, resume=None):
             print(row)
         if (gen + 1) % config["eval_every"] == 0 or gen + 1 == config["gens"]:
             ev = full_eval(eval_env, unravel(theta), n=config["eval_n"],
-                           seed=config["seed"], step=step)
+                           seed=config["seed"], step=step, iface_fn=eval_iface_fn)
             _log(out, dict(gen=gen, **_flat(ev)))
             print(f"  eval g{gen}: main={ev['main']} "
                   f"c4={ev['c4_coin_reward']['gate_q4']:.3f} "
@@ -708,7 +937,7 @@ def init_ppo_params(key, hidden=128, cfg=None):
     }
 
 
-def collect(env, params, task, key, reward_scale, step, loop):
+def collect(env, params, task, key, reward_scale, step, loop, iface=None):
     """One lifetime under the current policy. Returns everything the loss
     needs to recompute the forward pass exactly (teacher forcing on xs).
     Rewards come back late-weighted (PREREG_P0 selection pressure) and
@@ -717,8 +946,14 @@ def collect(env, params, task, key, reward_scale, step, loop):
 
     `step` is a B1 step_fn (looped.make_step). Legacy: sample from raw logits,
     value from the top-level head — byte-identical to the pre-B1 collect. Looped:
-    sample from the marginal commit dist; the state-value IS commit_v."""
+    sample from the marginal commit dist; the state-value IS commit_v.
+
+    `iface` (B2) is the per-lifetime (P, perm). xs store the PROJECTED obs and the
+    RAW action, so the loss replay (teacher-forced on xs) stays the exact forward
+    pass — the collect==forward lynchpin is preserved under randomization."""
     T = env["T"]
+    if iface is not None:
+        P, perm = iface
     key, k0 = jax.random.split(key)
     state0, obs0 = env["reset"](k0, task)
     h0 = jnp.zeros(hidden_size(params["gru"]))
@@ -728,11 +963,13 @@ def collect(env, params, task, key, reward_scale, step, loop):
     def step_fn(carry, w_t):
         h, state, obs, last_a, last_r, boundary, key = carry
         key, ka, kr, kres = jax.random.split(key, 4)
-        x = jnp.concatenate([obs, last_a, jnp.array([last_r, boundary])])
+        obs_in = P @ obs if iface is not None else obs
+        x = jnp.concatenate([obs_in, last_a, jnp.array([last_r, boundary])])
         h, sample_score, logp_all, value, aux = step(params["gru"], h, x)
         a = jax.random.categorical(ka, sample_score)
+        a_env = perm[a] if iface is not None else a
         v = value if loop else (h @ params["Wv"] + params["bv"])[0]
-        state, obs, r, done, _ = env["step"](state, a, kr, task)
+        state, obs, r, done, _ = env["step"](state, a_env, kr, task)
         rs_state, rs_obs = env["reset"](kres, task)
         state = jax.tree_util.tree_map(
             lambda new, old: jnp.where(done, new, old), rs_state, state)
@@ -773,6 +1010,7 @@ def make_update_step(env, unravel, cfg):
     step = make_step(cfg)
     k_max, k_min = int(cfg.get("k_max", 1)), int(cfg.get("k_min", 2))
     lam_p, kl_c = float(cfg.get("lam_p", 0.2)), float(cfg.get("kl_coef", 0.0))
+    iface_fn = make_iface_fn(cfg, for_eval=False)   # B2 train-interface sampler
 
     rew_scale = cfg.get("reward_scale", 1.0 - cfg["gamma"])
     # D3 landmine: at gamma=1.0 (route-reconciled config) the default 1-gamma=0
@@ -787,9 +1025,17 @@ def make_update_step(env, unravel, cfg):
         kt, kr = jax.random.split(key)
         tasks = jax.vmap(env["sample_task"])(jax.random.split(kt, n_life))
         keys = jax.random.split(kr, n_life)
-        xs, acts, logps, vals, rews = jax.vmap(
-            lambda t, k: collect(env, params, t, k, rew_scale, step, loop))(
-                tasks, keys)
+        if iface_fn is None:
+            xs, acts, logps, vals, rews = jax.vmap(
+                lambda t, k: collect(env, params, t, k, rew_scale, step, loop))(
+                    tasks, keys)
+        else:
+            # interface keys from a disjoint fold (does NOT consume kt/kr above)
+            ik = jax.random.split(jax.random.fold_in(key, IFACE_FOLD), n_life)
+            ifaces = jax.vmap(iface_fn)(ik)
+            xs, acts, logps, vals, rews = jax.vmap(
+                lambda t, k, i: collect(env, params, t, k, rew_scale, step, loop,
+                                        iface=i))(tasks, keys, ifaces)
         adv, rets = jax.vmap(lambda r, v: gae(r, v, gamma, lam))(rews, vals)
         adv = (adv - adv.mean()) / (adv.std() + 1e-8)
         return xs, acts, logps, adv, rets
@@ -865,6 +1111,7 @@ def train_ppo(config, resume=None):
           f"kwargs={config.get('eval_env_kwargs', config.get('env_kwargs', {}))}")
 
     step = make_step(config)
+    eval_iface_fn = make_iface_fn(config, for_eval=True)   # held-out eval interfaces
 
     if resume:
         theta, adam_state, key, start_up, saved_cfg, best_gate = load_ckpt(resume)
@@ -911,7 +1158,7 @@ def train_ppo(config, resume=None):
             print(row)
         if (up + 1) % config["eval_every"] == 0 or up + 1 == config["updates"]:
             ev = full_eval(eval_env, unravel(theta)["gru"], n=config["eval_n"],
-                           seed=config["seed"], step=step)
+                           seed=config["seed"], step=step, iface_fn=eval_iface_fn)
             _log(out, dict(update=up, **_flat(ev)))
             print(f"  eval u{up}: main={ev['main']} "
                   f"c4={ev['c4_coin_reward']['gate_q4']:.3f} "

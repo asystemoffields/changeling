@@ -11,20 +11,32 @@ import jax
 import jax.numpy as jnp
 
 from .rollout import rollout
+from .interface import IFACE_FOLD
 
 EVAL_FOLD = 10_000_000
 
 
-def eval_suite(env, params, n=100, seed=0, c4=False, c5=False, c6=False, step=None):
+def eval_suite(env, params, n=100, seed=0, c4=False, c5=False, c6=False, step=None,
+               iface_fn=None):
     key = jax.random.fold_in(jax.random.PRNGKey(seed), EVAL_FOLD)
     kt, kr = jax.random.split(key)
     tasks = jax.vmap(env["sample_task"])(jax.random.split(kt, n))
     keys = jax.random.split(kr, n)
 
-    def one(task, k):
-        return rollout(env, params, task, k, c4=c4, c5=c5, c6=c6, step=step)
+    if iface_fn is None:
+        def one(task, k):
+            return rollout(env, params, task, k, c4=c4, c5=c5, c6=c6, step=step)
+        rewards, metrics, dones, e_ks = jax.vmap(one)(tasks, keys)
+    else:
+        # NOVEL held-out interfaces: drawn from EVAL_FOLD ∘ IFACE_FOLD, disjoint
+        # from training interfaces (train keys ∘ IFACE_FOLD). Does not touch kt/kr.
+        ik = jax.random.split(jax.random.fold_in(key, IFACE_FOLD), n)
+        ifaces = jax.vmap(iface_fn)(ik)
 
-    rewards, metrics, dones, e_ks = jax.vmap(one)(tasks, keys)  # (n, T)
+        def one(task, k, iface):
+            return rollout(env, params, task, k, c4=c4, c5=c5, c6=c6, step=step,
+                           iface=iface)
+        rewards, metrics, dones, e_ks = jax.vmap(one)(tasks, keys, ifaces)
     T = rewards.shape[1]
     q = T // 4
     q1, q4 = rewards[:, :q], rewards[:, -q:]
@@ -58,12 +70,18 @@ def _binom_tail(k, n):
     return sum(comb(n, i) for i in range(k, n + 1)) / 2 ** n
 
 
-def full_eval(env, params, n=100, seed=0, step=None):
+def full_eval(env, params, n=100, seed=0, step=None, iface_fn=None):
     """Main condition plus PREREG controls. `step` is a B1 step_fn (looped path);
-    None grades the legacy gru substrate."""
+    None grades the legacy gru substrate. `iface_fn` (B2) grades under NOVEL
+    held-out interfaces; None grades the un-randomized (α=0-equivalent) protocol.
+    All conditions share the same held-out interface draw so controls are
+    comparable to main."""
     return dict(
-        main=eval_suite(env, params, n, seed, step=step),
-        c4_coin_reward=eval_suite(env, params, n, seed, c4=True, step=step),
-        c5_no_memory=eval_suite(env, params, n, seed, c5=True, step=step),
-        c6_full_amnesia=eval_suite(env, params, n, seed, c6=True, step=step),
+        main=eval_suite(env, params, n, seed, step=step, iface_fn=iface_fn),
+        c4_coin_reward=eval_suite(env, params, n, seed, c4=True, step=step,
+                                  iface_fn=iface_fn),
+        c5_no_memory=eval_suite(env, params, n, seed, c5=True, step=step,
+                                iface_fn=iface_fn),
+        c6_full_amnesia=eval_suite(env, params, n, seed, c6=True, step=step,
+                                   iface_fn=iface_fn),
     )

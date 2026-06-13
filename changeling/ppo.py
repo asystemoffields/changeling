@@ -26,6 +26,7 @@ from jax.flatten_util import ravel_pytree
 from . import IN_DIM, N_ACT
 from .agent import gru_step, init_gru, hidden_size
 from .looped import init_looped, make_step, kl_to_geometric
+from .interface import IFACE_FOLD, make_iface_fn
 from .es import adam_init, adam_ascend
 from .envs import ENVS
 from .evaluate import full_eval
@@ -47,7 +48,7 @@ def init_ppo_params(key, hidden=128, cfg=None):
     }
 
 
-def collect(env, params, task, key, reward_scale, step, loop):
+def collect(env, params, task, key, reward_scale, step, loop, iface=None):
     """One lifetime under the current policy. Returns everything the loss
     needs to recompute the forward pass exactly (teacher forcing on xs).
     Rewards come back late-weighted (PREREG_P0 selection pressure) and
@@ -56,8 +57,14 @@ def collect(env, params, task, key, reward_scale, step, loop):
 
     `step` is a B1 step_fn (looped.make_step). Legacy: sample from raw logits,
     value from the top-level head — byte-identical to the pre-B1 collect. Looped:
-    sample from the marginal commit dist; the state-value IS commit_v."""
+    sample from the marginal commit dist; the state-value IS commit_v.
+
+    `iface` (B2) is the per-lifetime (P, perm). xs store the PROJECTED obs and the
+    RAW action, so the loss replay (teacher-forced on xs) stays the exact forward
+    pass — the collect==forward lynchpin is preserved under randomization."""
     T = env["T"]
+    if iface is not None:
+        P, perm = iface
     key, k0 = jax.random.split(key)
     state0, obs0 = env["reset"](k0, task)
     h0 = jnp.zeros(hidden_size(params["gru"]))
@@ -67,11 +74,13 @@ def collect(env, params, task, key, reward_scale, step, loop):
     def step_fn(carry, w_t):
         h, state, obs, last_a, last_r, boundary, key = carry
         key, ka, kr, kres = jax.random.split(key, 4)
-        x = jnp.concatenate([obs, last_a, jnp.array([last_r, boundary])])
+        obs_in = P @ obs if iface is not None else obs
+        x = jnp.concatenate([obs_in, last_a, jnp.array([last_r, boundary])])
         h, sample_score, logp_all, value, aux = step(params["gru"], h, x)
         a = jax.random.categorical(ka, sample_score)
+        a_env = perm[a] if iface is not None else a
         v = value if loop else (h @ params["Wv"] + params["bv"])[0]
-        state, obs, r, done, _ = env["step"](state, a, kr, task)
+        state, obs, r, done, _ = env["step"](state, a_env, kr, task)
         rs_state, rs_obs = env["reset"](kres, task)
         state = jax.tree_util.tree_map(
             lambda new, old: jnp.where(done, new, old), rs_state, state)
@@ -112,6 +121,7 @@ def make_update_step(env, unravel, cfg):
     step = make_step(cfg)
     k_max, k_min = int(cfg.get("k_max", 1)), int(cfg.get("k_min", 2))
     lam_p, kl_c = float(cfg.get("lam_p", 0.2)), float(cfg.get("kl_coef", 0.0))
+    iface_fn = make_iface_fn(cfg, for_eval=False)   # B2 train-interface sampler
 
     rew_scale = cfg.get("reward_scale", 1.0 - cfg["gamma"])
     # D3 landmine: at gamma=1.0 (route-reconciled config) the default 1-gamma=0
@@ -126,9 +136,17 @@ def make_update_step(env, unravel, cfg):
         kt, kr = jax.random.split(key)
         tasks = jax.vmap(env["sample_task"])(jax.random.split(kt, n_life))
         keys = jax.random.split(kr, n_life)
-        xs, acts, logps, vals, rews = jax.vmap(
-            lambda t, k: collect(env, params, t, k, rew_scale, step, loop))(
-                tasks, keys)
+        if iface_fn is None:
+            xs, acts, logps, vals, rews = jax.vmap(
+                lambda t, k: collect(env, params, t, k, rew_scale, step, loop))(
+                    tasks, keys)
+        else:
+            # interface keys from a disjoint fold (does NOT consume kt/kr above)
+            ik = jax.random.split(jax.random.fold_in(key, IFACE_FOLD), n_life)
+            ifaces = jax.vmap(iface_fn)(ik)
+            xs, acts, logps, vals, rews = jax.vmap(
+                lambda t, k, i: collect(env, params, t, k, rew_scale, step, loop,
+                                        iface=i))(tasks, keys, ifaces)
         adv, rets = jax.vmap(lambda r, v: gae(r, v, gamma, lam))(rews, vals)
         adv = (adv - adv.mean()) / (adv.std() + 1e-8)
         return xs, acts, logps, adv, rets
@@ -204,6 +222,7 @@ def train_ppo(config, resume=None):
           f"kwargs={config.get('eval_env_kwargs', config.get('env_kwargs', {}))}")
 
     step = make_step(config)
+    eval_iface_fn = make_iface_fn(config, for_eval=True)   # held-out eval interfaces
 
     if resume:
         theta, adam_state, key, start_up, saved_cfg, best_gate = load_ckpt(resume)
@@ -250,7 +269,7 @@ def train_ppo(config, resume=None):
             print(row)
         if (up + 1) % config["eval_every"] == 0 or up + 1 == config["updates"]:
             ev = full_eval(eval_env, unravel(theta)["gru"], n=config["eval_n"],
-                           seed=config["seed"], step=step)
+                           seed=config["seed"], step=step, iface_fn=eval_iface_fn)
             _log(out, dict(update=up, **_flat(ev)))
             print(f"  eval u{up}: main={ev['main']} "
                   f"c4={ev['c4_coin_reward']['gate_q4']:.3f} "

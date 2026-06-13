@@ -21,8 +21,8 @@ PKG = ROOT / "changeling"
 # follow agent.py (it imports gru_step/init_gru). Module self-tests are dropped
 # (see build()): the bundled kernel runs as __main__, so any module's
 # `if __name__ == "__main__":` block would otherwise fire and sys.exit the kernel.
-ORDER = ["__init__.py", "envs.py", "agent.py", "looped.py", "rollout.py", "es.py",
-         "evaluate.py", "train.py", "ppo.py"]
+ORDER = ["__init__.py", "envs.py", "agent.py", "looped.py", "interface.py",
+         "rollout.py", "es.py", "evaluate.py", "train.py", "ppo.py"]
 INTRA = re.compile(r"^\s*from \.\S* import |^\s*from \. import ")
 MAIN_GUARD = re.compile(r"^if __name__ ==")
 

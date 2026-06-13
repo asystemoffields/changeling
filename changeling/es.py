@@ -12,6 +12,7 @@ import jax.numpy as jnp
 from jax.flatten_util import ravel_pytree
 
 from .rollout import rollout, late_weighted_fitness
+from .interface import IFACE_FOLD
 
 
 def centered_ranks(f):
@@ -34,25 +35,40 @@ def adam_ascend(theta, grad, st, lr, b1=0.9, b2=0.999, eps=1e-8):
 
 
 def make_gen_step(env, unravel, pop, n_lifetimes, sigma, lr,
-                  fitness_fn=late_weighted_fitness, step=None, ponder_cost=0.0):
+                  fitness_fn=late_weighted_fitness, step=None, ponder_cost=0.0,
+                  iface_fn=None):
     """Returns jitted (theta, adam_state, key) -> (theta', adam_state', stats).
 
     `step` is a B1 step_fn (looped.make_step); None -> legacy gru. `ponder_cost`
     is the −c·mean_t E[K] compute tax folded into ES fitness (the adaptive-K
     pressure). ponder_cost=0.0 + legacy step keeps member_fitness bitwise-identical
-    to the pre-B1 harness (e_k≡1, and f − 0.0·1.0 == f), so G0-A reproduces."""
+    to the pre-B1 harness (e_k≡1, and f − 0.0·1.0 == f), so G0-A reproduces.
+
+    `iface_fn` (B2) samples a per-lifetime interface (P, perm); None -> no
+    randomization (byte-identical). Interfaces are drawn once per generation from a
+    DISJOINT fold and SHARED across the population — so each antithetic mirror pair
+    still differs only in theta (CRN intact), and the interface-key stream never
+    perturbs the eps/task/roll splits (alpha=None reproduces G0-A exactly)."""
     assert pop % 2 == 0
 
-    def member_fitness(theta_flat, tasks, roll_keys):
+    def member_fitness(theta_flat, tasks, roll_keys, ifaces):
         params = unravel(theta_flat)
 
-        def one(task, k):
-            rewards, _, _, e_ks = rollout(env, params, task, k, step=step)
+        def one(task, k, iface):
+            rewards, _, _, e_ks = rollout(env, params, task, k, step=step,
+                                          iface=iface)
             return fitness_fn(rewards) - ponder_cost * e_ks.mean()
 
-        return jax.vmap(one)(tasks, roll_keys).mean()
+        if iface_fn is None:
+            return jax.vmap(lambda t, k: one(t, k, None))(tasks, roll_keys).mean()
+        return jax.vmap(one)(tasks, roll_keys, ifaces).mean()
 
     def gen_step(theta, adam_state, key):
+        # interface keys from a disjoint fold (does NOT consume the split below)
+        ifaces = None
+        if iface_fn is not None:
+            ik = jax.random.split(jax.random.fold_in(key, IFACE_FOLD), n_lifetimes)
+            ifaces = jax.vmap(iface_fn)(ik)
         key, ke, kt, kr = jax.random.split(key, 4)
         dim = theta.shape[0]
         eps = jax.random.normal(ke, (pop // 2, dim))
@@ -61,8 +77,8 @@ def make_gen_step(env, unravel, pop, n_lifetimes, sigma, lr,
         # shared across the population (hence across each antithetic pair): the
         # only difference between F+ and F- is then the theta perturbation
         roll_keys = jax.random.split(kr, n_lifetimes)
-        fits = jax.vmap(member_fitness, in_axes=(0, None, None))(
-            thetas, tasks, roll_keys)
+        fits = jax.vmap(member_fitness, in_axes=(0, None, None, None))(
+            thetas, tasks, roll_keys, ifaces)
         shaped = centered_ranks(fits)
         grad = jnp.concatenate([eps, -eps]).T @ shaped / (pop * sigma)
         theta, adam_state = adam_ascend(theta, grad, adam_state, lr)
