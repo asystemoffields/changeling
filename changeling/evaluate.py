@@ -17,7 +17,7 @@ EVAL_FOLD = 10_000_000
 
 
 def eval_suite(env, params, n=100, seed=0, c4=False, c5=False, c6=False, step=None,
-               iface_fn=None):
+               iface_fn=None, c8=False):
     key = jax.random.fold_in(jax.random.PRNGKey(seed), EVAL_FOLD)
     kt, kr = jax.random.split(key)
     tasks = jax.vmap(env["sample_task"])(jax.random.split(kt, n))
@@ -26,6 +26,14 @@ def eval_suite(env, params, n=100, seed=0, c4=False, c5=False, c6=False, step=No
     if iface_fn is None:
         def one(task, k):
             return rollout(env, params, task, k, c4=c4, c5=c5, c6=c6, step=step)
+        rewards, metrics, dones, e_ks = jax.vmap(one)(tasks, keys)
+    elif c8:
+        # C8 (within-lifetime reshuffle): rollout re-draws the interface EVERY
+        # step from the sampler; nothing decodable carries across steps. Predicted
+        # to collapse to chance on cbandit-FR (the G1-F falsifier).
+        def one(task, k):
+            return rollout(env, params, task, k, c4=c4, c5=c5, c6=c6, step=step,
+                           c8_iface_fn=iface_fn)
         rewards, metrics, dones, e_ks = jax.vmap(one)(tasks, keys)
     else:
         # NOVEL held-out interfaces: drawn from EVAL_FOLD ∘ IFACE_FOLD, disjoint
@@ -76,7 +84,7 @@ def full_eval(env, params, n=100, seed=0, step=None, iface_fn=None):
     held-out interfaces; None grades the un-randomized (α=0-equivalent) protocol.
     All conditions share the same held-out interface draw so controls are
     comparable to main."""
-    return dict(
+    out = dict(
         main=eval_suite(env, params, n, seed, step=step, iface_fn=iface_fn),
         c4_coin_reward=eval_suite(env, params, n, seed, c4=True, step=step,
                                   iface_fn=iface_fn),
@@ -85,3 +93,9 @@ def full_eval(env, params, n=100, seed=0, step=None, iface_fn=None):
         c6_full_amnesia=eval_suite(env, params, n, seed, c6=True, step=step,
                                    iface_fn=iface_fn),
     )
+    # C8 within-lifetime reshuffle only exists under randomization (nothing to
+    # reshuffle at α=None); on cbandit-FR it must sit at chance (G1-F).
+    if iface_fn is not None:
+        out["c8_reshuffle"] = eval_suite(env, params, n, seed, step=step,
+                                         iface_fn=iface_fn, c8=True)
+    return out

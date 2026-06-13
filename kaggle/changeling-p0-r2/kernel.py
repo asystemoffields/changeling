@@ -409,7 +409,13 @@ def make_iface_fn(config, for_eval=False):
     run config, or None when interface randomization is off (config['alpha'] is
     None) — in which case the whole harness takes the byte-identical no-iface path.
     For eval, `proj_family` may be overridden by `eval_proj_family` (the held-out
-    T-family, G1-G). Single-axis arms via `alpha_obs`/`alpha_act`."""
+    T-family, G1-G). Single-axis arms via `alpha_obs`/`alpha_act`.
+
+    C7 MEMORIZATION control (`fixed_interface: True`): during TRAINING only, every
+    lifetime is handed ONE frozen (P*,perm*) seeded from `interface_seed` (matches
+    α-strength, removes only the per-lifetime resampling). Eval is untouched — it
+    still draws NOVEL held-out interfaces — so a memorizer trained on the single
+    fixed interface collapses to chance on eval, the load-bearing falsifier."""
     import functools
     alpha = config.get("alpha")
     if alpha is None:
@@ -417,10 +423,14 @@ def make_iface_fn(config, for_eval=False):
     fam = config.get("proj_family", "expm-orthogonal")
     if for_eval:
         fam = config.get("eval_proj_family", fam)
-    return functools.partial(
+    sampler = functools.partial(
         sample_interface, alpha=float(alpha), proj_family=fam,
         c=float(config.get("projection_c", PROJ_C)),
         alpha_obs=config.get("alpha_obs"), alpha_act=config.get("alpha_act"))
+    if config.get("fixed_interface", False) and not for_eval:
+        fixed_key = jax.random.PRNGKey(int(config.get("interface_seed", 0)))
+        return lambda key: sampler(fixed_key)   # ignore per-lifetime key → one (P*,perm*)
+    return sampler
 
 
 def calibrate_c(key, n=OBS_DIM, batch=512, lo=0.1, hi=12.0, iters=40):
@@ -469,7 +479,7 @@ _LEGACY_STEP = make_step({})
 
 
 def rollout(env, params, task, key, c4=False, c5=False, c6=False, step=None,
-            iface=None):
+            iface=None, c8_iface_fn=None):
     """Returns (rewards, metrics, dones, e_ks) arrays of shape (T,). `e_ks` is the
     per-step E[K] micro-turn count (all-ones on the legacy/loop=False substrate);
     it is the K-collapse observable and feeds the ES ponder cost. `step` is a B1
@@ -480,11 +490,18 @@ def rollout(env, params, task, key, c4=False, c5=False, c6=False, step=None,
     agent's raw slot `a` reaches the env as `perm[a]` (the agent still remembers
     its RAW action via the RL² channel). iface=None ⇒ no projection/permutation,
     byte-identical to the pre-B2 harness; an identity interface (P=I, perm=id) is
-    a mathematical no-op."""
+    a mathematical no-op.
+
+    `c8_iface_fn` (C8 control, PREREG §2/G1-F): a sampler iface_fn(key)->(P,perm)
+    re-drawn EVERY step from a fresh key, so nothing decodable carries across steps.
+    Genuine per-lifetime inference collapses to chance under C8; a randomization-
+    INVARIANT heuristic would survive — so a non-chance C8 is the leak signature.
+    Mutually exclusive with `iface` (it supplies its own per-step interface)."""
     if step is None:
         step = _LEGACY_STEP
     if iface is not None:
-        P, perm = iface
+        P_fix, perm_fix = iface
+    use_iface = iface is not None or c8_iface_fn is not None
     if c6:
         c5 = True
     T = env["T"]
@@ -496,15 +513,21 @@ def rollout(env, params, task, key, c4=False, c5=False, c6=False, step=None,
 
     def step_fn(carry, _):
         h, state, obs, last_a, last_r, boundary, key = carry
-        key, ka, kr, kres, kc4 = jax.random.split(key, 5)
+        if c8_iface_fn is not None:
+            key, ka, kr, kres, kc4, kif = jax.random.split(key, 6)
+            P, perm = c8_iface_fn(kif)              # C8: fresh interface this step
+        else:
+            key, ka, kr, kres, kc4 = jax.random.split(key, 5)
+            if iface is not None:
+                P, perm = P_fix, perm_fix
         r_in = jax.random.bernoulli(kc4, 0.5).astype(jnp.float32) if c4 else last_r
         if c6:
             last_a, r_in = jnp.zeros_like(last_a), jnp.float32(0.0)
-        obs_in = P @ obs if iface is not None else obs
+        obs_in = P @ obs if use_iface else obs
         x = jnp.concatenate([obs_in, last_a, jnp.array([r_in, boundary])])
         h, sample_score, _logp_all, _v, aux = step(params, h, x)
         a = jax.random.categorical(ka, sample_score)
-        a_env = perm[a] if iface is not None else a
+        a_env = perm[a] if use_iface else a
         state, obs, r, done, metric = env["step"](state, a_env, kr, task)
         # auto-reset on episode end, same task
         rs_state, rs_obs = env["reset"](kres, task)
@@ -651,7 +674,7 @@ EVAL_FOLD = 10_000_000
 
 
 def eval_suite(env, params, n=100, seed=0, c4=False, c5=False, c6=False, step=None,
-               iface_fn=None):
+               iface_fn=None, c8=False):
     key = jax.random.fold_in(jax.random.PRNGKey(seed), EVAL_FOLD)
     kt, kr = jax.random.split(key)
     tasks = jax.vmap(env["sample_task"])(jax.random.split(kt, n))
@@ -660,6 +683,14 @@ def eval_suite(env, params, n=100, seed=0, c4=False, c5=False, c6=False, step=No
     if iface_fn is None:
         def one(task, k):
             return rollout(env, params, task, k, c4=c4, c5=c5, c6=c6, step=step)
+        rewards, metrics, dones, e_ks = jax.vmap(one)(tasks, keys)
+    elif c8:
+        # C8 (within-lifetime reshuffle): rollout re-draws the interface EVERY
+        # step from the sampler; nothing decodable carries across steps. Predicted
+        # to collapse to chance on cbandit-FR (the G1-F falsifier).
+        def one(task, k):
+            return rollout(env, params, task, k, c4=c4, c5=c5, c6=c6, step=step,
+                           c8_iface_fn=iface_fn)
         rewards, metrics, dones, e_ks = jax.vmap(one)(tasks, keys)
     else:
         # NOVEL held-out interfaces: drawn from EVAL_FOLD ∘ IFACE_FOLD, disjoint
@@ -710,7 +741,7 @@ def full_eval(env, params, n=100, seed=0, step=None, iface_fn=None):
     held-out interfaces; None grades the un-randomized (α=0-equivalent) protocol.
     All conditions share the same held-out interface draw so controls are
     comparable to main."""
-    return dict(
+    out = dict(
         main=eval_suite(env, params, n, seed, step=step, iface_fn=iface_fn),
         c4_coin_reward=eval_suite(env, params, n, seed, c4=True, step=step,
                                   iface_fn=iface_fn),
@@ -719,6 +750,12 @@ def full_eval(env, params, n=100, seed=0, step=None, iface_fn=None):
         c6_full_amnesia=eval_suite(env, params, n, seed, c6=True, step=step,
                                    iface_fn=iface_fn),
     )
+    # C8 within-lifetime reshuffle only exists under randomization (nothing to
+    # reshuffle at α=None); on cbandit-FR it must sit at chance (G1-F).
+    if iface_fn is not None:
+        out["c8_reshuffle"] = eval_suite(env, params, n, seed, step=step,
+                                         iface_fn=iface_fn, c8=True)
+    return out
 
 # ===== changeling/train.py =====
 """Generation loop with jsonl logging and npz checkpoint/resume."""
@@ -774,12 +811,23 @@ _RESUME_FREE = {"max_seconds", "stop_gate", "stop_slope_pos", "updates", "gens",
 
 
 def assert_resume_cfg(saved_cfg, config):
+    # forward: every objective key in the new config must match the saved value.
     for k in config:
         if k in _RESUME_FREE:
             continue
         assert saved_cfg.get(k) == config[k], (
             f"resume config mismatch on {k!r}: saved={saved_cfg.get(k)!r} "
             f"new={config[k]!r} (objective-determining keys must match)")
+    # backward (B2/B3 leak-hunt fix): an objective key present in saved_cfg but
+    # DROPPED from the new config is otherwise never checked, then silently reverts
+    # to a code default (e.g. dropping alpha_obs flips a P-only run to both-axes;
+    # dropping loop reverts the looped core to GRU). Require it to be present.
+    for k in saved_cfg:
+        if k in _RESUME_FREE:
+            continue
+        assert k in config, (
+            f"resume config DROPPED objective key {k!r} (saved={saved_cfg[k]!r}); "
+            f"it would silently revert to a default — pass it explicitly")
 
 
 def assert_pure_gate(config, eval_env):

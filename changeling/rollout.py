@@ -26,7 +26,7 @@ _LEGACY_STEP = make_step({})
 
 
 def rollout(env, params, task, key, c4=False, c5=False, c6=False, step=None,
-            iface=None):
+            iface=None, c8_iface_fn=None):
     """Returns (rewards, metrics, dones, e_ks) arrays of shape (T,). `e_ks` is the
     per-step E[K] micro-turn count (all-ones on the legacy/loop=False substrate);
     it is the K-collapse observable and feeds the ES ponder cost. `step` is a B1
@@ -37,11 +37,18 @@ def rollout(env, params, task, key, c4=False, c5=False, c6=False, step=None,
     agent's raw slot `a` reaches the env as `perm[a]` (the agent still remembers
     its RAW action via the RL² channel). iface=None ⇒ no projection/permutation,
     byte-identical to the pre-B2 harness; an identity interface (P=I, perm=id) is
-    a mathematical no-op."""
+    a mathematical no-op.
+
+    `c8_iface_fn` (C8 control, PREREG §2/G1-F): a sampler iface_fn(key)->(P,perm)
+    re-drawn EVERY step from a fresh key, so nothing decodable carries across steps.
+    Genuine per-lifetime inference collapses to chance under C8; a randomization-
+    INVARIANT heuristic would survive — so a non-chance C8 is the leak signature.
+    Mutually exclusive with `iface` (it supplies its own per-step interface)."""
     if step is None:
         step = _LEGACY_STEP
     if iface is not None:
-        P, perm = iface
+        P_fix, perm_fix = iface
+    use_iface = iface is not None or c8_iface_fn is not None
     if c6:
         c5 = True
     T = env["T"]
@@ -53,15 +60,21 @@ def rollout(env, params, task, key, c4=False, c5=False, c6=False, step=None,
 
     def step_fn(carry, _):
         h, state, obs, last_a, last_r, boundary, key = carry
-        key, ka, kr, kres, kc4 = jax.random.split(key, 5)
+        if c8_iface_fn is not None:
+            key, ka, kr, kres, kc4, kif = jax.random.split(key, 6)
+            P, perm = c8_iface_fn(kif)              # C8: fresh interface this step
+        else:
+            key, ka, kr, kres, kc4 = jax.random.split(key, 5)
+            if iface is not None:
+                P, perm = P_fix, perm_fix
         r_in = jax.random.bernoulli(kc4, 0.5).astype(jnp.float32) if c4 else last_r
         if c6:
             last_a, r_in = jnp.zeros_like(last_a), jnp.float32(0.0)
-        obs_in = P @ obs if iface is not None else obs
+        obs_in = P @ obs if use_iface else obs
         x = jnp.concatenate([obs_in, last_a, jnp.array([r_in, boundary])])
         h, sample_score, _logp_all, _v, aux = step(params, h, x)
         a = jax.random.categorical(ka, sample_score)
-        a_env = perm[a] if iface is not None else a
+        a_env = perm[a] if use_iface else a
         state, obs, r, done, metric = env["step"](state, a_env, kr, task)
         # auto-reset on episode end, same task
         rs_state, rs_obs = env["reset"](kres, task)

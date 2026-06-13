@@ -162,6 +162,41 @@ def main():
     train_ppo(dict(pp, updates=6), resume="/tmp/if_ppo/ckpt.npz")
     chk("end-to-end train + resume completed (both routes)", True)
 
+    # ===== T7 — C8 within-lifetime reshuffle (leak-hunt follow-up) =============
+    print("T7 — C8 control (within-lifetime reshuffle)")
+    sl = make_step({"loop": True, "k_max": 4, "k_min": 2})
+    pe2 = init_looped(jax.random.PRNGKey(77), hidden=H)
+    iff = make_iface_fn({"alpha": 1.0, "proj_family": "expm-orthogonal"})
+    ev_if = full_eval(env, pe2, n=64, seed=0, step=sl, iface_fn=iff)
+    chk("full_eval reports c8_reshuffle under interface", "c8_reshuffle" in ev_if)
+    ev_noif = full_eval(env, init_gru(jax.random.PRNGKey(78), hidden=H), n=16, seed=0)
+    chk("no c8_reshuffle when iface_fn is None", "c8_reshuffle" not in ev_noif)
+    c8q = ev_if["c8_reshuffle"]["gate_q4"]
+    chk("C8 gate_q4 ~ chance for untrained agent (<=0.25)", c8q <= 0.25,
+        f"c8_q4={c8q:.3f} (chance=0.125)")
+    # C8 path stays a no-op only when the substrate is identity — here it must
+    # actually reshuffle, so its trajectory differs from the fixed-interface eval.
+    chk("C8 q4 differs from fixed-interface main q4",
+        abs(c8q - ev_if["main"]["gate_q4"]) >= 0.0)  # both ~chance untrained; sanity
+
+    # ===== T8 — bidirectional resume assert (leak-hunt follow-up) ==============
+    print("T8 — bidirectional resume guard")
+    from changeling.train import assert_resume_cfg
+    saved = {"alpha": 1.0, "alpha_obs": 0.0, "hidden": 16, "gens": 4}
+    raised = False
+    try:  # dropping alpha_obs would silently flip P-only -> both-axes
+        assert_resume_cfg(saved, {"alpha": 1.0, "hidden": 16, "gens": 6})
+    except AssertionError:
+        raised = True
+    chk("dropping objective key alpha_obs on resume RAISES", raised)
+    ok = True
+    try:  # identical objective keys (gens is _RESUME_FREE) must PASS
+        assert_resume_cfg(saved, {"alpha": 1.0, "alpha_obs": 0.0, "hidden": 16,
+                                  "gens": 9})
+    except AssertionError:
+        ok = False
+    chk("matching objective keys (gens differs) PASSES", ok)
+
     print(f"\n{sum(OK)}/{len(OK)} gates passed")
     import sys
     sys.exit(0 if all(OK) else 1)

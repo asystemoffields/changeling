@@ -58,12 +58,23 @@ _RESUME_FREE = {"max_seconds", "stop_gate", "stop_slope_pos", "updates", "gens",
 
 
 def assert_resume_cfg(saved_cfg, config):
+    # forward: every objective key in the new config must match the saved value.
     for k in config:
         if k in _RESUME_FREE:
             continue
         assert saved_cfg.get(k) == config[k], (
             f"resume config mismatch on {k!r}: saved={saved_cfg.get(k)!r} "
             f"new={config[k]!r} (objective-determining keys must match)")
+    # backward (B2/B3 leak-hunt fix): an objective key present in saved_cfg but
+    # DROPPED from the new config is otherwise never checked, then silently reverts
+    # to a code default (e.g. dropping alpha_obs flips a P-only run to both-axes;
+    # dropping loop reverts the looped core to GRU). Require it to be present.
+    for k in saved_cfg:
+        if k in _RESUME_FREE:
+            continue
+        assert k in config, (
+            f"resume config DROPPED objective key {k!r} (saved={saved_cfg[k]!r}); "
+            f"it would silently revert to a default — pass it explicitly")
 
 
 def assert_pure_gate(config, eval_env):
