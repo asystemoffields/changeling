@@ -16,11 +16,12 @@ import jax.numpy as jnp
 from . import OBS_DIM
 
 
-def bandit_env(n_arms=8, lifetime=200, needle=False):
+def bandit_env(n_arms=8, lifetime=200, needle=False, mix=0.0):
     """Bernoulli bandit. Default: p_i ~ U(0,1) per lifetime (forgiving —
     second-best is typically close to best, so satisficing nearly pays).
     needle=True: one arm at 0.9, the rest at 0.1 — finding the needle is
-    constitutive of success; settling pays 0.1. One-step episodes."""
+    constitutive of success; settling pays 0.1. mix=p: each lifetime is a
+    needle task w.p. p, else uniform (curriculum contrast). One-step episodes."""
     assert 2 <= n_arms <= 8
 
     def sample_task(key):
@@ -28,6 +29,16 @@ def bandit_env(n_arms=8, lifetime=200, needle=False):
             pos = jax.random.randint(key, (), 0, n_arms)
             return jnp.where(jnp.arange(n_arms) == pos, 0.9, 0.1)
         return jax.random.uniform(key, (n_arms,))
+
+    if mix > 0:
+        base = sample_task
+
+        def sample_task(key):  # noqa: F811 — mixture wraps the base sampler
+            ku, kn, kc = jax.random.split(key, 3)
+            pos = jax.random.randint(kn, (), 0, n_arms)
+            needle_p = jnp.where(jnp.arange(n_arms) == pos, 0.9, 0.1)
+            return jnp.where(jax.random.bernoulli(kc, mix),
+                             needle_p, base(ku))
 
     def reset(key, task):
         return (), jnp.zeros(OBS_DIM)
