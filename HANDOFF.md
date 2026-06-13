@@ -1,11 +1,50 @@
-# HANDOFF — state as of 2026-06-12 (ultracode session 2)
+# HANDOFF — state as of 2026-06-13 (ultracode session 3)
 
 Single source of truth for continuing **changeling**. Read in this order: `SPEC.md`
-(design + gates), `PREREG_P0.md` (locked criteria + deviations D1/D2/D3 + Gate 0
-outcome), `reports/` (findings — now incl. `gate0.md`), then this file. Everything is
-reproducible from this repo + Kaggle account `asystemoffields`. Local box:
-`/data/changeling`, venv `.venv` (CPU jax). Memory of record:
-`~/.claude/projects/-home-alex/memory/project_changeling.md`.
+(design + gates), `PREREG_P1.md` (LOCKED Phase-1 criteria), `PREREG_P0.md` (Phase-0
+locked criteria + D1/D2/D3 + Gate 0 outcome), `reports/` (findings — incl. `gate0.md`,
+`memory_arch_risks.md`, `p1_leak_hunt.md`), then this file. Everything is reproducible
+from this repo + Kaggle account `asystemoffields`. Local box: `/data/changeling`, venv
+`.venv` (CPU jax); Kaggle CLI at `/data/kagglecli-venv/bin/kaggle` (`KAGGLE_CONFIG_DIR=
+~/.kaggle`). Memory of record: `~/.claude/projects/-home-alex/memory/project_changeling.md`.
+
+## PHASE 1 LOCKED 2026-06-13; §5 cold-start tripwire RUNNING on Kaggle
+
+`PREREG_P1.md` is **LOCKED**. All B1–B5 preconditions built+tested; an adversarial
+leak-hunt (`reports/p1_leak_hunt.md`) cleared the tripwire and its 3 real findings (C8,
+single-axis cells, bidirectional resume) are all CLOSED — the harness is **Gate-1-ready
+for the cold-start mainline**. Substrate built this session (commits 698ef5e→589bcee):
+- **B1** looped core + adaptive-K (`changeling/looped.py`, `make_step`) threaded through
+  rollout/es/evaluate/train/ppo; G0-A 0.6216 regression + collect==forward lynchpin both
+  BITWISE. `scripts/test_increment_a.py` 18/18.
+- **B2** interface randomization (`changeling/interface.py`: expm-orthogonal P, action
+  perm, signed-perm T-family, single-axis `alpha_obs`/`alpha_act`, C7 `fixed_interface`,
+  C8 per-step reshuffle, `projection_c=1.94` calibrated). **B3** cbandit-FR/FG env.
+  `scripts/test_interface.py` 22/22.
+- Kernels (`scripts/build_kernel.py`): `--route p1` (§5 tripwire), `--route p1axes`
+  (single-axis G1-C/D + C7-P/C7-π). Rebuild after any package edit.
+
+**LIVE METERED RUN:** `asystemoffields/changeling-p1-tripwire` (3 cells: ref α=0, cold
+α=1, c7 fixed-interface; cbandit-FR GRU-128 R2 D3-reconciled). Check:
+`KAGGLE_CONFIG_DIR=~/.kaggle /data/kagglecli-venv/bin/kaggle kernels status
+asystemoffields/changeling-p1-tripwire`; fetch: `... kernels output ...`.
+
+### NEXT ACTIONS — keyed on the tripwire verdict (read its stdout first)
+The tripwire prints a verdict block: REF/COLD/C7 q4+slope, the **pre-committed cold-start
+trigger** (slope sign-p≥0.05 OR q4≤C6+0.10 ⇒ switch to anneal), C7 dissociation, D3
+stability.
+1. **If cold-start holds (trigger clear) + cbandit-FR learnable (COLD slope>0, q4≫C6) +
+   D3 stable:** proceed to the capacity ladder — build a `p1cap` route (cbandit-FR cold,
+   GRU {128,256,512}, R2, single-seed interior + GRU-512×3 seeds for G1-B). Then `p1axes`
+   (already built) for G1-C/D, the C7 battery, bandit-invariance (G1-E), cbandit-FG (G1-FG),
+   and the R1-vs-R2 D3-reconciled route slopes. Build the **S2 transformer substrate**
+   (PREREG §1, implements the `make_step` interface) for the S1-vs-S2 capacity slope.
+2. **If the trigger FIRES (cold-start fails):** build the **anneal α-schedule** feature
+   (α-curriculum over updates on the grid {0,0.1,…,1.0}, performance-gated; NOT yet built)
+   and re-run the tripwire annealed before the battery. The single-axis/capacity kernels
+   then use the anneal schedule (eval still graded at α=1).
+3. **If cbandit-FR is NOT learnable even at α=0 (REF q4 ≪ 0.98):** stop and diagnose the
+   env/reward/obs before any battery spend — the §5 tripwire exists precisely to catch this.
 
 ## Continuity note (model-agnostic by design)
 
@@ -57,22 +96,19 @@ per-step reward reshaped by γ-discounted GAE (effective γ^t·w_t, early-tilted
 slope comparison is confounded until reconciled in the Phase-1 route protocol. Does not affect
 any single-route eval.
 
-## Standing next actions (priority order)
+## Standing next actions
 
-1. **LOCK PREREG_P1, then build + run.** `PREREG_P1.md` is a DRAFT (judge-panel design,
-   transfer-honest spine: cbandit-FR contextual-bandit headline env, bandit demoted to
-   invariance/negative control, expm-orthogonal interface randomization, S1/S2 ladders,
-   D3-reconciled routes). **It locks once Alex resolves the 5 Open Decisions at the top of
-   the file** (chiefly: frozen-rule vs fresh-g as the primary thesis; PASS ∧/∨ on the
-   action-permutation axis). After lock: build engineering preconditions B1–B3 (substrate-
-   agnostic `step_fn`; `interface.py` sample/apply; cbandit env) — B1 regression gate = GRU
-   path reproduces G0-A 0.6216; B4 (reward_scale>0 guard) is DONE — then run §5 first
-   experiment (cold-start tripwire on cbandit-FR, GRU-128 R2 γ=1.0 reward_scale=1/256, α=0
-   vs α=1 + C7, ~2 GPU-h) BEFORE any expensive compute. No metered run before lock.
-2. **DONE this session:** multi-seed exploration-economics hardening (`reports/explore_seeds.md`
-   — the strong single-seed "world teaches wanting" transfer claims do NOT replicate; only a
-   mild mix≈0.5 effect, baked into PREREG_P1 as a non-gating prior). Crystallized the s2-mix
-   agent (`reports/crystal_compare.md` — value-tracking up, perseveration unchanged).
+See **"NEXT ACTIONS — keyed on the tripwire verdict"** above — the immediate path is
+gated on the running §5 tripwire. Beyond that, per ratified decisions: the memory STORE +
+consolidation (SPEC §5b Increment B/C) are a separate **S3 mini-phase** AFTER the
+memoryless-core Phase-1 result; the **Weaver** (Phase 2b) and **SAE dissection** (Phase 4)
+follow the substrate/route decisions. The looped core's K_max ladder {1,2,4,8} is its own
+Phase-1 axis (S3-M.1) on cbandit-FR once the GRU baseline lands.
+
+Earlier-session results still standing: multi-seed exploration hardening
+(`reports/explore_seeds.md` — strong single-seed "world teaches wanting" claims did NOT
+replicate; only a mild mix≈0.5 prior, baked into PREREG_P1 as non-gating); s2-mix
+crystallization (`reports/crystal_compare.md` — value-tracking up, perseveration unchanged).
 
 ## Infra truths (carry forward)
 
