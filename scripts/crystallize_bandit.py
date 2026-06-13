@@ -35,7 +35,15 @@ ENV = bandit_env(n_arms=K, lifetime=T)
 # ---------- fossil ----------
 
 def load_fossil(path, hidden=128):
+    """Return the GRU params of an ES OR PPO checkpoint (auto-detected from the
+    stored config — PPO carries gamma/lam and a value head, ES does not)."""
     z = np.load(path, allow_pickle=False)
+    cfg = json.loads(str(z["config"])) if "config" in z.files else {}
+    hidden = cfg.get("hidden", hidden)
+    if "gamma" in cfg:  # PPO: deploy artifact is params["gru"]
+        from changeling.ppo import init_ppo_params
+        _, unravel = ravel_pytree(init_ppo_params(jax.random.PRNGKey(0), hidden))
+        return unravel(jnp.asarray(z["theta"]))["gru"]
     _, unravel = ravel_pytree(init_gru(jax.random.PRNGKey(0), hidden=hidden))
     return unravel(jnp.asarray(z["theta"]))
 
@@ -296,10 +304,10 @@ def main(ckpt):
                 f"{f'{rew:.3f}' if rew is not None else '-':>7s}")
         print(line)
         lines.append(line)
-    out = Path("runs/crystal_bandit")
+    out = Path("runs/crystal_" + Path(ckpt).parent.name)
     out.mkdir(parents=True, exist_ok=True)
     (out / "report.md").write_text(
-        "# Crystallization pilot — ES bandit fossil\n\n```\n"
+        f"# Crystallization — {ckpt}\n\n```\n"
         + "\n".join(lines) + "\n```\n")
     print(f"\nwrote {out / 'report.md'}")
 
