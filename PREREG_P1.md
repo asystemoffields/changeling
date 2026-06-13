@@ -1,6 +1,24 @@
-# PREREG — Phase 1: interface randomization (DRAFT — NOT LOCKED)
+# PREREG — Phase 1: interface randomization (LOCKED 2026-06-13)
 
-**Status: DRAFT.** Produced by a 5-design judge-panel (transfer-honest spine,
+**Status: LOCKED 2026-06-13** (before the first metered run, per staged-prereg
+discipline). All decisions ratified, all B1–B5 preconditions built+tested, and an
+adversarial leak-hunt (`reports/p1_leak_hunt.md`) CLEARED the §5 cold-start tripwire —
+the first metered run. The leak-hunt's three real findings are **harness
+implementation gaps for the LATER Gate-1 battery, not design changes** (C8 and C7-P/
+C7-π are already specified in §2/§3; the design is unchanged): they are recorded as
+BINDING pre-Gate-1 follow-ups below and do not gate the tripwire. Lock = a
+git-reversible commitment of the experimental design + criteria; following the
+evidence may still require documented deviation later.
+
+**BINDING pre-Gate-1-battery follow-ups (un-metered; build before the Gate-1 metered
+runs, NOT before the tripwire — `reports/p1_leak_hunt.md`):** (1) implement **C8**
+within-lifetime reshuffle (per-step interface resample) + add to `full_eval` — the
+G1-F falsifier; (2) schedule the **C7-P / C7-π single-axis cells** (mechanism exists:
+`fixed_interface` + `alpha_obs`/`alpha_act`) — required for the mandatory G1-C; (3)
+make **`assert_resume_cfg` bidirectional** (a dropped key currently reverts to default
+silently — B5's "covers every key" was over-stated) + a resume-asymmetry test.
+
+**Status: was DRAFT.** Produced by a 5-design judge-panel (transfer-honest spine,
 graded 8.0/10; grafts from cold-start-purist, substrate-scaling-first,
 reproduction-first, diversity-transition). All Open Decisions are RESOLVED (the 5
 PREREG_P1 forks + the 4 memory-architecture decisions in `reports/memory_arch_risks.md`,
