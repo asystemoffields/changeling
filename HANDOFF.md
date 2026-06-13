@@ -59,19 +59,20 @@ any single-route eval.
 
 ## Standing next actions (priority order)
 
-1. **Phase 1 = interface randomization** (SPEC §7, the load-bearing novelty): per-lifetime
-   random obs projection + action permutation. Design via judge-panel → lock PREREG_P1 BEFORE
-   the first metered run. Bake in: the mixture/contrast lesson (D2), the hidden-size scaling
-   rung (Gate-0 PARK prediction) which doubles as the §1b-1 route protocol, the D3
-   late-weighting reconciliation, the C6 control, multi-seed assays, the slope sign test, and
-   the no-op interface. Substrate S1 GRU (control) vs S2 small transformer (interp target).
-2. **Multi-seed assay hardening** (Kaggle, embarrassingly parallel): the exploration-economics
-   2×2 and the mixture result are SINGLE-SEED (caveat in `reports/`). Fan out across seeds +
-   cells (mix∈{0.25,0.5,0.75}, needle-gap sweep) before any enters PREREG_P1.
-3. **Crystallize the s2-mix agent** (`scripts/crystallize_bandit.py` pattern; needs a
-   PPO-ckpt loader — copy `scripts/eval_ckpt.py:load`). Sharp question: did the harder world
-   breed the perseveration term DOWN and value-tracking UP vs the ES fossil? Phase-4
-   kernel-extraction in miniature.
+1. **LOCK PREREG_P1, then build + run.** `PREREG_P1.md` is a DRAFT (judge-panel design,
+   transfer-honest spine: cbandit-FR contextual-bandit headline env, bandit demoted to
+   invariance/negative control, expm-orthogonal interface randomization, S1/S2 ladders,
+   D3-reconciled routes). **It locks once Alex resolves the 5 Open Decisions at the top of
+   the file** (chiefly: frozen-rule vs fresh-g as the primary thesis; PASS ∧/∨ on the
+   action-permutation axis). After lock: build engineering preconditions B1–B3 (substrate-
+   agnostic `step_fn`; `interface.py` sample/apply; cbandit env) — B1 regression gate = GRU
+   path reproduces G0-A 0.6216; B4 (reward_scale>0 guard) is DONE — then run §5 first
+   experiment (cold-start tripwire on cbandit-FR, GRU-128 R2 γ=1.0 reward_scale=1/256, α=0
+   vs α=1 + C7, ~2 GPU-h) BEFORE any expensive compute. No metered run before lock.
+2. **DONE this session:** multi-seed exploration-economics hardening (`reports/explore_seeds.md`
+   — the strong single-seed "world teaches wanting" transfer claims do NOT replicate; only a
+   mild mix≈0.5 effect, baked into PREREG_P1 as a non-gating prior). Crystallized the s2-mix
+   agent (`reports/crystal_compare.md` — value-tracking up, perseveration unchanged).
 
 ## Infra truths (carry forward)
 

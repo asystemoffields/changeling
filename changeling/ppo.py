@@ -95,6 +95,12 @@ def make_update_step(env, unravel, cfg):
     clip, vf_c, ent_c = cfg["clip"], cfg["vf_coef"], cfg["ent_coef"]
 
     rew_scale = cfg.get("reward_scale", 1.0 - cfg["gamma"])
+    # D3 landmine: at gamma=1.0 (route-reconciled config) the default 1-gamma=0
+    # would zero every training reward. Require an explicit positive scale.
+    assert rew_scale > 0, (
+        f"reward_scale={rew_scale} (<=0) zeros every training reward; with "
+        f"gamma={cfg['gamma']} the default 1-gamma is non-positive — pass "
+        f"reward_scale explicitly (D3 reconciliation uses 1/T at gamma=1.0).")
 
     def batch_collect(theta, key):
         params = unravel(theta)
