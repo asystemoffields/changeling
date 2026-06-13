@@ -8,13 +8,29 @@ regression gates. No metered (Kaggle) run fires before lock. Builds on the
 hardened P0 harness (`reports/gate0.md`) and honors D1 (reference-relative bars),
 D2 (curriculum mixture), D3 (route-objective reconciliation).
 
+**Scope (SPEC §1d).** Phase 1 is the **memoryless core** — in-context interface
+inference carrying *nothing across lifetimes*. The consolidation / neuroplasticity
+axis (§1d) is explicitly OUT OF SCOPE here; it enters later as a strictly-additive
+bolt-on with a mandatory null-memory control. **Nothing in Phase 1 may depend on
+cross-lifetime memory**, and the memoryless core's standalone competence is the
+primary deliverable.
+
 ---
 
-## Open decisions (need Alex before lock)
+## Decisions (RESOLVED 2026-06-13 by Alex)
 
-The design is complete modulo five forks that change *what Phase 1 claims* or
-*what it costs* — genuinely yours, not resolvable from SPEC/defaults. My
-recommendation is the first listed each time; I've drafted to the recommendation.
+**Resolved** (reasoning retained below for provenance):
+1. **FR primary + FG CO-GATED (max rigor)** — cbandit-FR gates the clean both-axes
+   mechanism AND cbandit-FG is *also* gated for goal-faithful obs+task composition
+   (stronger than the drafted FR-primary/FG-secondary).
+2. **Budget the KILL-scale S2-C run this phase** (last to descope).
+3. **PASS = ∧** — action-permutation isolation (G1-C) MANDATORY.
+4. *(defaulted)* route verdict on the shared-ladder GPU-h slope.
+5. *(defaulted)* reward-affine DEFERRED to Phase 3.
+
+All five resolved ⇒ lockable once preconditions B1–B5 pass their regression gates. A
+new SPEC §1d (two-timescale memoryless-core + consolidation) was added 2026-06-13 — it is
+an axis *above* Phase 1, not a change to it. Original fork text + recommendations follow:
 
 1. **Headline env: frozen-rule (cbandit-FR) vs fresh-g (cbandit-FG) as PRIMARY.**
    *Rec: frozen-rule primary, fresh-g secondary.* FR is the only way to make
@@ -89,7 +105,7 @@ curriculum claim must be re-established at scale, not assumed.
     *because the rule is fixed and shared across contexts*). The within-lifetime slope is
     *pure interface-inference speed*. This is where the memorization control collapses on
     BOTH axes.
-  - **cbandit-FG (fresh-g) = SECONDARY confirmation.** y(c) resampled per lifetime ⇒
+  - **cbandit-FG (fresh-g) = CO-GATED (goal-faithful composition).** y(c) resampled per lifetime ⇒
     genuine in-context *task* learning under randomization (RL²-faithful). Confirms
     interface-inference composes with task-learning; π is absorbed into g here (so it is
     NOT used for the action-axis claim).
@@ -195,8 +211,11 @@ collapse for soft-only.
 - **G1-F (controls):** C4 slope→0; C6, C8 ≤ chance+0.075; C5 collapses.
 - **G1-G (T-family):** signed-permutation held-out family — slope>0 (p<0.05); report level.
 - **G1-H (budget):** ≤60 GPU-h cumulative.
-- **PASS = G1-A ∧ G1-B ∧ G1-C ∧ G1-E at KILL-scale** (open decision 3 sets the ∧/∨).
-  G1-D/G/secondary cbandit-FG strengthen.
+- **G1-FG (CO-GATED — goal-faithful composition, cbandit-FG):** under randomized interface
+  with a fresh per-lifetime rule, task-learning slope>0 (p<0.05) AND final-quarter ≥ 0.70 ×
+  C3-FG. Confirms interface-inference composes with from-scratch task-learning.
+- **PASS = G1-A ∧ G1-B ∧ G1-C ∧ G1-E ∧ G1-FG at KILL-scale** (∧ confirmed; FR carries the
+  clean both-axes mechanism, FG co-gates the composition — Alex 2026-06-13). G1-D/G strengthen.
 - **KILL/PARK scale (SPEC §7):** KILL licensed ONLY at S2-C ≥1M params AND ≥2e9 env-steps
   if G1-A fails AND the capacity slope ≤0 AND both cold-start and anneal fail. Every
   lower-scale miss PARKs with the capacity-regression's predicted params-to-cross.

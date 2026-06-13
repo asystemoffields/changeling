@@ -103,6 +103,56 @@ yield a DiscoRL-shaped rule-as-math as a byproduct, with full provenance).
 North star, Alex 2026-06-12: *"incredibly potent at small scale, which — due to
 intrinsic properties — improves with scale."*
 
+## 1d. Two timescales: a memoryless core that consolidates (added 2026-06-13, Alex)
+
+The changeling learns on two timescales, strictly ordered.
+
+- **Fast (inner, in activations) — THE CORE.** A fresh instance learns each lifetime from
+  scratch, in its recurrent activations, through a randomized interface (the §1 bet). This
+  core is *memoryless across lifetimes* — it carries nothing in from past experience — and
+  it **must be incredibly potent that way**: it is the cognition, the headline result, and
+  the primary optimization target at every gate. ("Memoryless" = no cross-lifetime carry;
+  the *within-lifetime* working memory the learning algorithm runs on is essential and is
+  exactly what C5/C6 ablate — the core is not amnesiac within a lifetime.)
+- **Slow (outer, into weights/store) — consolidation / neuroplasticity.** A *particular
+  instance* bakes recurring experience into its slow weights (and/or an explicit store), so
+  a more-experienced instance carries the benefit of what it has lived — AlphaGo-shaped:
+  fast in-context improvement (≈ MCTS) amortized back into slow weights (≈ self-play),
+  round after round. This is **strictly additive**. Its only jobs are to stop hard-won
+  in-context experience from being *wasted*, and to carry the intrinsic-scaling story
+  (North Star). It is never the cognition.
+
+**Discipline (binding):**
+1. Nail the memoryless core first; add consolidation only once the core is excellent
+   standalone.
+2. **Null-memory control (mandatory).** Ablate consolidation/memory ⇒ the core's competence
+   must be *undiminished*. Memory propping up the core is a failure, not a result — the same
+   "connectors-not-cognition" / null-kernel rule (§4b, Phase 4) applied to the slow loop.
+   Memory's value is reported only as a *separate* delta: experience retained + scaling slope.
+3. **Randomization protects plasticity.** Consolidating experience into weights ordinarily
+   risks the learning algorithm atrophying into a lookup table (the §1c anti-goal).
+   Per-lifetime interface randomization is the regularizer that prevents this: because the
+   interface is never stable enough to memorize, the general learner stays load-bearing
+   forever, so the slow loop can safely consolidate genuine recurring *task/domain* structure
+   without eating the inner-loop learner. The stability–plasticity dilemma is resolved by the
+   environment, not a hand-tuned mechanism.
+
+**Eventual gate (triad, scale-gated like the rest):** (a) the memoryless core is excellent
+standalone [PRIMARY]; (b) an experienced instance beats a fresh one on *recurring* structure;
+(c) the experienced instance still learns *novel* structure from scratch as well as a fresh
+one does (plasticity preserved), and (b) vanishes under the null-memory ablation.
+
+**Mechanism left open (bitter-lesson — decide empirically):** (a) continual outer loop
+(meta-training never stops; deployment experience keeps updating weights); (b) explicit
+slow/fast two-weight substrate (fast weights / S3 store do the in-context part, periodic
+consolidation into slow weights — CLS / fast-weight-programmer lineage); (c) online
+crystallization-into-weights (distill the inner loop's reliably-good behavior back into slow
+weights — the most direct AlphaGo analog; reuses the Phase-5 crystallization machinery).
+Connects: S3 (§4b) is the fast store; the crystallization ratchet (Phase 5) is the
+slow-consolidation operator; the Phase-4 kernel test is "a fresh kernel still learns from
+scratch." Phase 1 establishes the memoryless core; this axis enters *after*, never as a
+Phase-1 crutch.
+
 ## 2. The interface protocol (fixed for the life of the project)
 
 - Observation: vector in R^D, D = 64 ⚖. Native env obs are mapped in by a random sparse
