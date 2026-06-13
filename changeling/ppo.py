@@ -238,9 +238,33 @@ def train_ppo(config, resume=None):
         start_up = 0
         best_gate = -1.0
 
-    batch_collect, epoch_step = make_update_step(env, unravel, config)
-    print(f"R2 PPO env={env['name']} dim={theta.shape[0]} "
-          f"B={config['n_lifetimes']} T={env['T']}")
+    # Anneal (PREREG §5 fallback, armed when the cold-start trigger fired): ramp the
+    # interface strength α through a grid, performance-gated, rebuilding the jitted
+    # update step on each advance (re-jit is paid ≤len(grid) times — negligible). The
+    # GATE metric stays α=1 (config['alpha']=1.0 ⇒ eval_iface_fn); advancement is gated
+    # on performance at the CURRENT grid α. Index persists across resume via
+    # out/anneal.json (leaves save_ckpt/load_ckpt untouched).
+    anneal = config.get("anneal", False)
+    a_grid = config.get("alpha_grid", [0.0, 0.1, 0.2, 0.35, 0.5, 0.7, 0.85, 1.0])
+    a_thr = float(config.get("anneal_threshold", 0.7))
+    aidx = 0
+    if anneal and resume and (out / "anneal.json").exists():
+        aidx = int(json.loads((out / "anneal.json").read_text())["idx"])
+
+    def _build(a):
+        c = dict(config, alpha=float(a))
+        bc, es = make_update_step(env, unravel, c)
+        return bc, es, make_iface_fn(c, for_eval=True)
+
+    eval_if_cur = None
+    if anneal:
+        batch_collect, epoch_step, eval_if_cur = _build(a_grid[aidx])
+        print(f"R2 PPO ANNEAL env={env['name']} grid={a_grid} start_idx={aidx} "
+              f"thr={a_thr} dim={theta.shape[0]} B={config['n_lifetimes']} T={env['T']}")
+    else:
+        batch_collect, epoch_step = make_update_step(env, unravel, config)
+        print(f"R2 PPO env={env['name']} dim={theta.shape[0]} "
+              f"B={config['n_lifetimes']} T={env['T']}")
 
     max_seconds = config.get("max_seconds")
     stop_gate = config.get("stop_gate")
@@ -274,6 +298,19 @@ def train_ppo(config, resume=None):
             print(f"  eval u{up}: main={ev['main']} "
                   f"c4={ev['c4_coin_reward']['gate_q4']:.3f} "
                   f"c5={ev['c5_no_memory']['gate_q4']:.3f}")
+            # ANNEAL: advance α when performance at the CURRENT grid level clears the
+            # threshold (eval at current α, not the α=1 gate above). Rebuild on advance.
+            if anneal and aidx < len(a_grid) - 1:
+                ev_cur = full_eval(eval_env, unravel(theta)["gru"], n=config["eval_n"],
+                                   seed=config["seed"], step=step, iface_fn=eval_if_cur)
+                cur_q4 = ev_cur["main"]["gate_q4"]
+                _log(out, dict(update=up, anneal_alpha=a_grid[aidx], anneal_cur_q4=cur_q4))
+                if cur_q4 >= a_thr:
+                    aidx += 1
+                    batch_collect, epoch_step, eval_if_cur = _build(a_grid[aidx])
+                    (out / "anneal.json").write_text(json.dumps({"idx": aidx}))
+                    print(f"  ANNEAL advance -> alpha={a_grid[aidx]} "
+                          f"(cur-α q4={cur_q4:.3f} >= {a_thr})")
             if ev["main"]["gate_q4"] > best_gate:
                 best_gate = ev["main"]["gate_q4"]
                 save_ckpt(out / "ckpt_best.npz", theta, adam_state, key,
