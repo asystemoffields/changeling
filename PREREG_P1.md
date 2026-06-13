@@ -5,15 +5,21 @@ graded 8.0/10; grafts from cold-start-purist, substrate-scaling-first,
 reproduction-first, diversity-transition). All Open Decisions are RESOLVED (the 5
 PREREG_P1 forks + the 4 memory-architecture decisions in `reports/memory_arch_risks.md`,
 all ratified 2026-06-13). **Lock is gated ONLY on the B1–B5 engineering
-preconditions.** Status: **B1 DONE** (substrate-agnostic step + looped core; G0-A
-0.6216 regression and collect==forward replay both bitwise; 18/18 in
-`scripts/test_increment_a.py`), **B4 DONE** (2026-06-12). **Remaining: B2** (interface
-randomization module) **and B3** (cbandit-FR/FG env family); **B5** (resume asserts on
-the interface keys) confirmable once B2/B3 add those keys. The Phase-1 substrate is the
-**looped core + adaptive-K micro-turns (SPEC §5b Increment A)**; the memory store +
-consolidation are a separate S3 mini-phase (decision 1). No metered (Kaggle) run fires
-before lock. Builds on the hardened P0 harness (`reports/gate0.md`) and honors D1
-(reference-relative bars), D2 (curriculum mixture), D3 (route-objective reconciliation).
+preconditions — ALL NOW BUILT & TESTED (2026-06-13):** B1 (substrate-agnostic step +
+looped core; G0-A 0.6216 regression and collect==forward replay both bitwise; 18/18
+`scripts/test_increment_a.py`), B2 (interface randomization; 16/16
+`scripts/test_interface.py`), B3 (cbandit-FR/FG env), B4 (D3 reward_scale guard,
+2026-06-12), B5 (full-config resume assert covers all new objective keys). An
+adversarial leak-hunt over B2/B3 (the proven harness-review pattern) is the last
+un-metered gate before the lock. Per the standing autonomy posture (lock = a
+git-reversible decide-and-document action; Kaggle = free/quota compute, not a
+one-way door), the lock and the first metered run (§5 cold-start tripwire) proceed
+autonomously once the leak-hunt clears — documented here, not gated on a human
+checkpoint. The Phase-1 substrate is the **looped core +
+adaptive-K micro-turns (SPEC §5b Increment A)**; the memory store + consolidation are
+a separate S3 mini-phase (decision 1). No metered (Kaggle) run fires before lock.
+Builds on the hardened P0 harness (`reports/gate0.md`) and honors D1 (reference-relative
+bars), D2 (curriculum mixture), D3 (route-objective reconciliation).
 
 **Scope (SPEC §1d).** Phase 1 is the **memoryless core** — in-context interface
 inference carrying *nothing across lifetimes*. The consolidation / neuroplasticity
@@ -84,20 +90,34 @@ curriculum claim must be re-established at scale, not assumed.
   byte-identical to the pre-B1 GRU path, so G0-A = 0.6216 reproduces exactly; the
   collect==forward replay lynchpin is also bitwise (max|Δ|=0.0). All 4 Increment-A
   gates pass (`scripts/test_increment_a.py`, 18/18).
-- **B2 — interface module `interface.py`.** `sample_interface(key, alpha) -> (P, pi)`;
-  applied inside `rollout()` and `ppo.collect()` to the padded obs and emitted action.
-  Interface is part of the per-lifetime `task` (keyed sampling) so held-out eval draws
-  NOVEL interfaces from the disjoint `EVAL_FOLD` automatically.
-- **B3 — cbandit env family** (one env, two modes via `frozen_rule: bool`); see §1.
+- **B2 — interface module `interface.py`. DONE 2026-06-13.** `sample_interface(key,
+  alpha) -> (P, perm)`; applied inside `rollout()`, `ppo.collect()`, `es` and
+  `evaluate` as `P @ obs` (agent's view) + `perm[a]` to the env (raw `a` still fed
+  back via the RL² channel). Interfaces are sampled per-lifetime from a DISJOINT fold
+  (`IFACE_FOLD`) — they never perturb the task/rollout RNG splits, so `alpha=None` is
+  byte-identical to pre-B2; eval interfaces (`EVAL_FOLD ∘ IFACE_FOLD`) are NOVEL and
+  held-out, and the draw is SHARED across the ES population (CRN intact). `projection_c`
+  calibrated un-metered (the §4 projection-c smoke): **c=1.94** ⇒ mean self-correlation
+  ≈0 at α=1. Single-axis arms via `alpha_obs`/`alpha_act`. 16/16 in
+  `scripts/test_interface.py`.
+- **B3 — cbandit env family. DONE 2026-06-13.** `cbandit_env(frozen_rule: bool)` —
+  one env, FR (fixed shared rule from `rule_seed`) vs FG (per-lifetime rule); C=5
+  onehot contexts, K=8 arms, T=256 one-step trials, std 0.8/0.2 + needle 0.95/0.05
+  curriculum mix, metric = pulled-correct-arm. Interface-agnostic (scores the
+  post-permutation arm). See §1.
 - **B4 — D3 config landmine (DONE 2026-06-12).** `ppo.make_update_step` defaulted
   `reward_scale = 1-gamma`; at γ=1.0 that is **0.0 — it zeros every training reward.**
   A guard now asserts `reward_scale > 0`; every D3-reconciled run passes `reward_scale =
   1/T` explicitly. `collect()` already hardcodes `w = linspace(0.5,1.5,T)`; at γ=1 that
   is exactly the effective per-step weight wanted — no change.
-- **B5 — resume asserts** extended to the new objective-determining keys (`alpha`,
-  `proj_family`, `perm_scheme`, `frozen_rule`, `rule_seed`, `C_ctx`, `gamma`, `lam`,
-  `reward_scale`). (The full-config resume assert from P0 already covers any key present
-  in `config`; confirm these are all set.)
+- **B5 — resume asserts. CONFIRMED 2026-06-13.** `assert_resume_cfg` iterates every
+  key in `config` (only the `_RESUME_FREE` survivability knobs may differ), so the new
+  objective-determining keys — `alpha`, `proj_family`, `eval_proj_family`,
+  `alpha_obs`, `alpha_act`, `projection_c`, `loop`, `k_max`, `k_min`, `ponder_cost`,
+  `kl_coef`, `lam_p`, `gamma`, `lam`, `reward_scale`, and the whole `env_kwargs`
+  (carrying `frozen_rule`, `rule_seed`, `C_ctx`) — are all covered automatically. A
+  resume that changes the interface distribution or the FR rule fails the assert.
+  Verified by the train+resume roundtrip (`test_interface.py` T6, `test_increment_a`).
 
 ## 1. Setup
 

@@ -107,6 +107,130 @@ if __name__ == "__main__":
 '''
 
 
+# Phase-1 §5 cold-start tripwire (cbandit-FR, R2 PPO, D3-reconciled). 3 cells:
+#   ref  α=0 (un-randomized C3 reference) | cold α=1 (cold-start mainline) |
+#   c7   α=1 + fixed_interface (memorization control: trained on ONE frozen
+#        interface, eval'd on NOVEL held-out interfaces — predicted to collapse).
+# Substrate = plain GRU (loop=False): the tripwire de-risks env+randomization+D3,
+# NOT the looped core (that gets its own K_max ladder — one new variable at a time).
+# P1_MAIN uses NO str.format (literal braces are fine); params come from P1_HEADER.
+P1_MAIN = r'''
+
+# ===== kernel main (Phase-1 §5 cold-start tripwire) =====
+if __name__ == "__main__":
+    import os, glob, time
+    print("jax devices:", jax.devices())
+    smoke = os.environ.get("CHANGELING_SMOKE") == "1"
+    base = "/kaggle/working" if os.path.isdir("/kaggle/working") else "runs_kernel"
+    wall_start = time.time()
+    WALL_BUDGET = 7.5 * 3600
+
+    common = dict(env="cbandit", hidden=HIDDEN, n_lifetimes=N_LIFE, lr=LR,
+                  gamma=1.0, lam=0.95, reward_scale=1.0 / T_LIFE, clip=0.2,
+                  epochs=4, vf_coef=0.5, ent_coef=0.01, max_grad_norm=0.5, seed=0,
+                  eval_n=EVAL_N, eval_every=EVAL_EVERY, log_every=50, ckpt_every=500,
+                  loop=False, proj_family="expm-orthogonal",
+                  env_kwargs=dict(n_arms=8, lifetime=T_LIFE, C_ctx=5,
+                                  frozen_rule=True, mix=0.5),
+                  eval_env_kwargs=dict(n_arms=8, lifetime=T_LIFE, C_ctx=5,
+                                       frozen_rule=True, mix=0.0))  # pure gate
+    cells = [("ref",  dict(alpha=None)),
+             ("cold", dict(alpha=1.0)),
+             ("c7",   dict(alpha=1.0, fixed_interface=True, interface_seed=12345))]
+    UPDATES_ = UPDATES
+    if smoke:
+        common.update(hidden=32, n_lifetimes=8, eval_n=40, eval_every=5,
+                      log_every=1, ckpt_every=5)
+        UPDATES_ = 5
+
+    def find_resume(name):
+        hits = sorted(h for h in glob.glob("/kaggle/input/**/ckpt.npz", recursive=True)
+                      if name in h)
+        return hits[0] if hits else None
+
+    results = {}
+    for cname, extra in cells:
+        cfg = dict(common, out=base + "/p1_" + cname,
+                   max_seconds=WALL_BUDGET - (time.time() - wall_start),
+                   updates=UPDATES_, **extra)
+        resume = find_resume("p1_" + cname)
+        print("\n##### p1 cell [" + cname + "]: alpha=" + str(extra.get("alpha"))
+              + " resume=" + str(resume))
+        theta, unravel = train_ppo(cfg, resume=resume)
+        step = make_step(cfg)
+        eval_if = make_iface_fn(cfg, for_eval=True)
+        gate_env = ENVS["cbandit"](n_arms=8, lifetime=T_LIFE, C_ctx=5,
+                                   frozen_rule=True, mix=0.0)
+        ev = full_eval(gate_env, unravel(theta)["gru"], n=cfg["eval_n"],
+                       seed=cfg["seed"], step=step, iface_fn=eval_if)
+        results[cname] = ev
+        m = ev["main"]
+        print("  [" + cname + "] gate_q4=%.3f slope=%+.4f sign_p=%.4g c6=%.3f"
+              % (m["gate_q4"], m["slope"], m["slope_sign_p"],
+                 ev["c6_full_amnesia"]["gate_q4"]))
+
+    print("\n=== Phase-1 §5 cold-start tripwire verdict (cbandit-FR, R2/D3) ===")
+    ref, cold, c7 = results["ref"]["main"], results["cold"]["main"], results["c7"]["main"]
+    c6 = results["cold"]["c6_full_amnesia"]["gate_q4"]
+    print("REF  (a=0)  q4=%.3f slope=%+.4f   (near-ceiling expected)"
+          % (ref["gate_q4"], ref["slope"]))
+    print("COLD (a=1)  q4=%.3f slope=%+.4f sign_p=%.4g  vs C6=%.3f"
+          % (cold["gate_q4"], cold["slope"], cold["slope_sign_p"], c6))
+    print("C7 (fixed-iface, NOVEL eval) q4=%.3f slope=%+.4f  (collapse ~0.125 expected)"
+          % (c7["gate_q4"], c7["slope"]))
+    trig = (cold["slope_sign_p"] >= 0.05) or (cold["gate_q4"] <= c6 + 0.10)
+    print("PRE-COMMITTED COLD-START TRIGGER (slope sign-p>=0.05 OR q4<=C6+0.10): "
+          + ("FIRED -> switch ALL runs to ANNEAL" if trig
+             else "clear -> cold-start mainline holds"))
+    print("C7 DISSOCIATION (C7 collapses while REF near ceiling): "
+          + ("PRESENT" if (c7["gate_q4"] <= 0.20 and ref["gate_q4"] >= 0.50)
+             else "NOT-yet (scale-dependent; PARK with capacity-regression)"))
+    print("D3 PPO STABILITY: trained " + str(len(results)) + " cells NaN-free at gamma=1.0")
+    print("\ntotal wall:", round(time.time() - wall_start), "s")
+'''
+
+
+def build_p1(session=1, updates=6000, tag=""):
+    """Phase-1 §5 cold-start tripwire kernel. ~1e8 env steps/cell at the default
+    (n_lifetimes=64, T=256 ⇒ 16384 steps/update; 6000 updates ≈ 9.8e7)."""
+    slug = ("changeling-p1-tripwire"
+            + (f"-s{session}" if session != 1 else "") + tag)
+    datasets = [] if session == 1 else ["asystemoffields/changeling-ckpts"]
+    header = ("\n# ===== Phase-1 tripwire params (generated by build_kernel) =====\n"
+              f"HIDDEN = 128\nN_LIFE = 64\nT_LIFE = 256\nLR = 5e-4\n"
+              f"EVAL_N = 1000\nEVAL_EVERY = 2000\nUPDATES = {updates}\n")
+    parts = ['"""changeling Phase-1 §5 cold-start tripwire — AUTOGENERATED by '
+             'scripts/build_kernel.py; do not edit by hand. See PREREG_P1.md §5."""']
+    for fname in ORDER:
+        lines = []
+        for l in (PKG / fname).read_text().splitlines():
+            if MAIN_GUARD.match(l):
+                break
+            if INTRA.match(l):
+                continue
+            lines.append(l)
+        parts.append(f"\n# ===== changeling/{fname} =====\n" + "\n".join(lines))
+    parts.append(header + P1_MAIN)
+    out_dir = ROOT / "kaggle" / slug
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "kernel.py").write_text("\n".join(parts))
+    (out_dir / "kernel-metadata.json").write_text(json.dumps({
+        "id": f"asystemoffields/{slug}",
+        "title": slug,
+        "code_file": "kernel.py",
+        "language": "python",
+        "kernel_type": "script",
+        "is_private": True,
+        "enable_gpu": True,
+        "enable_internet": False,
+        "dataset_sources": datasets,
+        "competition_sources": [],
+        "kernel_sources": [],
+    }, indent=2) + "\n")
+    print(f"wrote {out_dir}/kernel.py "
+          f"({(out_dir / 'kernel.py').stat().st_size} bytes)")
+
+
 def build(route, session=1, updates=8000, mix=0.0, ent=None, tag=""):
     base = "changeling-p0-gate" if route == "es" else "changeling-p0-r2"
     slug = (base if session == 1 else f"{base}-s{session}") + tag
@@ -149,11 +273,15 @@ def build(route, session=1, updates=8000, mix=0.0, ent=None, tag=""):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--route", choices=["es", "ppo"], default="es")
+    ap.add_argument("--route", choices=["es", "ppo", "p1"], default="es")
     ap.add_argument("--session", type=int, default=1)
     ap.add_argument("--updates", type=int, default=8000)
     ap.add_argument("--mix", type=float, default=0.0)
     ap.add_argument("--ent", type=float, default=None)
     ap.add_argument("--tag", default="")
     a = ap.parse_args()
-    build(a.route, a.session, a.updates, a.mix, a.ent, a.tag)
+    if a.route == "p1":
+        # default 6000 updates/cell ≈ 1e8 env steps (override with --updates)
+        build_p1(a.session, a.updates if a.updates != 8000 else 6000, a.tag)
+    else:
+        build(a.route, a.session, a.updates, a.mix, a.ent, a.tag)

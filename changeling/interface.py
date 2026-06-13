@@ -89,7 +89,13 @@ def make_iface_fn(config, for_eval=False):
     run config, or None when interface randomization is off (config['alpha'] is
     None) — in which case the whole harness takes the byte-identical no-iface path.
     For eval, `proj_family` may be overridden by `eval_proj_family` (the held-out
-    T-family, G1-G). Single-axis arms via `alpha_obs`/`alpha_act`."""
+    T-family, G1-G). Single-axis arms via `alpha_obs`/`alpha_act`.
+
+    C7 MEMORIZATION control (`fixed_interface: True`): during TRAINING only, every
+    lifetime is handed ONE frozen (P*,perm*) seeded from `interface_seed` (matches
+    α-strength, removes only the per-lifetime resampling). Eval is untouched — it
+    still draws NOVEL held-out interfaces — so a memorizer trained on the single
+    fixed interface collapses to chance on eval, the load-bearing falsifier."""
     import functools
     alpha = config.get("alpha")
     if alpha is None:
@@ -97,10 +103,14 @@ def make_iface_fn(config, for_eval=False):
     fam = config.get("proj_family", "expm-orthogonal")
     if for_eval:
         fam = config.get("eval_proj_family", fam)
-    return functools.partial(
+    sampler = functools.partial(
         sample_interface, alpha=float(alpha), proj_family=fam,
         c=float(config.get("projection_c", PROJ_C)),
         alpha_obs=config.get("alpha_obs"), alpha_act=config.get("alpha_act"))
+    if config.get("fixed_interface", False) and not for_eval:
+        fixed_key = jax.random.PRNGKey(int(config.get("interface_seed", 0)))
+        return lambda key: sampler(fixed_key)   # ignore per-lifetime key → one (P*,perm*)
+    return sampler
 
 
 def calibrate_c(key, n=OBS_DIM, batch=512, lo=0.1, hi=12.0, iters=40):
