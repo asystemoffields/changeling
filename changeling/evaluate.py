@@ -15,14 +15,14 @@ from .rollout import rollout
 EVAL_FOLD = 10_000_000
 
 
-def eval_suite(env, params, n=100, seed=0, c4=False, c5=False):
+def eval_suite(env, params, n=100, seed=0, c4=False, c5=False, c6=False):
     key = jax.random.fold_in(jax.random.PRNGKey(seed), EVAL_FOLD)
     kt, kr = jax.random.split(key)
     tasks = jax.vmap(env["sample_task"])(jax.random.split(kt, n))
     keys = jax.random.split(kr, n)
 
     def one(task, k):
-        return rollout(env, params, task, k, c4=c4, c5=c5)
+        return rollout(env, params, task, k, c4=c4, c5=c5, c6=c6)
 
     rewards, metrics, dones = jax.vmap(one)(tasks, keys)  # (n, T)
     T = rewards.shape[1]
@@ -60,4 +60,5 @@ def full_eval(env, params, n=100, seed=0):
         main=eval_suite(env, params, n, seed),
         c4_coin_reward=eval_suite(env, params, n, seed, c4=True),
         c5_no_memory=eval_suite(env, params, n, seed, c5=True),
+        c6_full_amnesia=eval_suite(env, params, n, seed, c6=True),
     )

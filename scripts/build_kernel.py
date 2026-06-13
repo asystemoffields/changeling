@@ -60,7 +60,8 @@ if __name__ == "__main__":
                       ckpt_every=250)
         jobs = [("bandit", dict(updates={updates}, stop_gate=GATE_BANDIT,
                                 stop_slope_pos=True,
-                                env_kwargs=dict(mix={mix})))]
+                                env_kwargs=dict(mix={mix}),
+                                eval_env_kwargs=dict()))]  # stop listens to gate task
         trainer = train_ppo
     if smoke:
         common.update(hidden=32, eval_n=20, eval_every=5, log_every=1,

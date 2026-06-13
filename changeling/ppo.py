@@ -140,6 +140,10 @@ def train_ppo(config, resume=None):
     out = Path(config["out"])
     out.mkdir(parents=True, exist_ok=True)
     env = ENVS[config["env"]](**config.get("env_kwargs", {}))
+    # eval (and therefore stop_gate) listens to the GATE task, which may
+    # differ from the training distribution (e.g. mixture curricula)
+    eval_env = ENVS[config["env"]](**config.get("eval_env_kwargs",
+                                                config.get("env_kwargs", {})))
 
     if resume:
         theta, adam_state, key, start_up, saved_cfg = load_ckpt(resume)
@@ -181,7 +185,7 @@ def train_ppo(config, resume=None):
             _log(out, row)
             print(row)
         if (up + 1) % config["eval_every"] == 0 or up + 1 == config["updates"]:
-            ev = full_eval(env, unravel(theta)["gru"], n=config["eval_n"],
+            ev = full_eval(eval_env, unravel(theta)["gru"], n=config["eval_n"],
                            seed=config["seed"])
             _log(out, dict(update=up, **_flat(ev)))
             print(f"  eval u{up}: main={ev['main']} "

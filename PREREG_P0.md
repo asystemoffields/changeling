@@ -56,6 +56,14 @@ gen 199); bandit G0-A slope/G0-B/G0-C PASS but gate_q4 plateaued ≈0.25-0.31 fr
 through gen 2999 — converged local strategy, not budget shortfall. R1 bandit attempts
 beyond locked hypers (e.g., M>8) would be deviations and must be logged here first.
 
+**Interpretation note (2026-06-12, no criterion change):** C5 resets recurrent state
+but the RL² input channel still carries last-action/last-reward, so a memoryless
+policy can express one-step win-stay reflexes (~0.15–0.22 best-arm). C5 therefore
+bounds the *non-recurrent* component of performance, not "no memory" absolutely.
+R2 session 2 measured C5 = 0.219 vs main 0.515: ≥ 0.30 of its performance is genuine
+recurrent in-context learning. A full-amnesia variant (also zeroing the input channel)
+joins the control suite from Phase 1.
+
 ## Deviations log (append-only)
 
 - **D1 (2026-06-12) — G0-A recalibrated from absolute to reference-relative.**
@@ -70,3 +78,17 @@ beyond locked hypers (e.g., M>8) would be deviations and must be logged here fir
   the reference computation never sees the agent, the 90% fraction follows literature
   convention rather than fitting our numbers, and the recalibrated bar does NOT pass the
   current best agent. Slope, C4, C5, G0-D unchanged.
+
+- **D2 (2026-06-12) — R2 training distribution becomes a curriculum mixture.**
+  Both routes plateau under pure-uniform training (ES ~0.25; R2 ~0.52 at 8k and at
+  fresh 32k updates — more compute does not help; R2's entropy collapses to 0.01,
+  i.e. the optimizer settles in policy space). Toy-scale curriculum test
+  (`scripts/mixture_test.py`, 4 cells, matched compute, evaluated on the UNIFORM gate
+  task): mixture-trained (50% needle lifetimes) 0.333 vs uniform-trained 0.241;
+  ent_coef=0.03 alone 0.241; mixture+ent worse than mixture alone. Therefore the next
+  R2 gate attempt trains on mix=0.5 (each lifetime: needle task w.p. 0.5, else
+  uniform). **The gate evaluation task is unchanged** (pure uniform, same seed
+  protocol); early-stop listens to the gate task, not the training distribution.
+  Logged before the gate-scale run. Note: this converts G0-A from pure reproduction
+  into a miniature of the project thesis — training-distribution breadth buying
+  held-out performance.

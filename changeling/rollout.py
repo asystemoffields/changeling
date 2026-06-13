@@ -3,7 +3,11 @@ lifetime; env auto-resets on done (same task). Controls (PREREG_P0):
   c4 — blind the agent's reward *input* with a fair coin (env reward still
        scored); in-context learning should collapse where reward is the only cue.
   c5 — reset hidden state on every episode boundary; memory is the only
-       learning mechanism, so this is the no-memory control.
+       learning mechanism, so this is the no-memory control. NOTE: the RL²
+       input channel (last action/reward) still flows — C5 bounds the
+       non-recurrent component, not memory absolutely.
+  c6 — full amnesia: C5 plus zeroed last-action/last-reward inputs; nothing
+       carries across steps. Performance must be exactly chance-level.
 """
 import jax
 import jax.numpy as jnp
@@ -12,8 +16,10 @@ from . import N_ACT
 from .agent import gru_step, hidden_size
 
 
-def rollout(env, params, task, key, c4=False, c5=False):
+def rollout(env, params, task, key, c4=False, c5=False, c6=False):
     """Returns (rewards, metrics, dones) arrays of shape (T,)."""
+    if c6:
+        c5 = True
     T = env["T"]
     key, k0 = jax.random.split(key)
     state0, obs0 = env["reset"](k0, task)
@@ -25,6 +31,8 @@ def rollout(env, params, task, key, c4=False, c5=False):
         h, state, obs, last_a, last_r, boundary, key = carry
         key, ka, kr, kres, kc4 = jax.random.split(key, 5)
         r_in = jax.random.bernoulli(kc4, 0.5).astype(jnp.float32) if c4 else last_r
+        if c6:
+            last_a, r_in = jnp.zeros_like(last_a), jnp.float32(0.0)
         x = jnp.concatenate([obs, last_a, jnp.array([r_in, boundary])])
         h, logits = gru_step(params, h, x)
         a = jax.random.categorical(ka, logits)
