@@ -250,6 +250,67 @@ probes ⚖, run at every gate from Phase 1 on:
 - S1 vs S2 head-to-head at Gate 1, decided by scaling slope per §1b-1; carry both
   forward if affordable, else the winner plus the other as control.
 
+## §5b / S3-M — Memory + Compute substrate (looped core · adaptive-K micro-turns · selective consolidation)
+
+**Status.** v0.1, committable. **Spine = the *minimal-robust* design** (strict superset of the current harness: K_max=1 + zero-store + zero-slow-bank collapses exactly to today's `gru_step`/`collect`/`loss_fn`). Realized in JAX (port the SVA/hourglass *mechanisms* — content-addressed read/write, looped core — to JAX; they are PyTorch, so we reuse the mechanism not the model). Grafts attributed inline: dual value heads and deferred-write-on-RL²-channel from *maximal-ambitious*; literature scaffolding (PonderNet/PKM/NEC/MERLIN/DNC/Titans/EWC) from *literature-faithful*; the **W-window store-BPTT**, **capacity-env staging**, **phase-conditioned probe**, and **reward-aligned halting supervision** are synthesizer additions. Folds into the PREREG_P1 **B1** abstract-`step_fn` refactor; honors §1d ordering, §1b bitter-lesson, §4b (memory = connectors, not cognition). Build follows `reports/memory_arch_risks.md` (binding risk register + first increment).
+
+### S3-M.0 Sequencing (binding, mirrors §1d)
+1. **Increment A — looped core + adaptive-K (no store, no slow bank).** Weight-tied core run K_max micro-turns/env-step, PonderNet-marginalized. Ships into Phase-1 cbandit-FR; the **compute-per-decision (K_max) axis** is the only memory/compute axis Phase-1 can exercise (interface inference is compute-bound, not capacity-bound).
+2. **Increment B — fast content-addressed store.** A per-lifetime-carry member. Its **capacity (N_slots) and lifetime-length slopes are NOT graded on cbandit-FR** (S3-M.5) — graded on a dedicated memory-demand env.
+3. **Increment C — selective consolidation (slow bank).** Strictly-additive, zero-able, deferred until the memoryless core is excellent standalone at α=1. Never a Phase-1 crutch.
+
+### S3-M.1 Looped core + adaptive-K micro-turns (PonderNet, marginalized)
+Replace `gru_step` in the step body with `micro_loop(params, carry, x) -> (carry, commit_logits, commit_v, aux)`, a **static `lax.scan` of length K_max nested inside** the per-env-step scan over T. At the GRU rung the core is `gru_step` applied K_max times to an internal thinking input (hourglass shape; recurrent DEPTH over fixed context, not sequence extension → attention stays O(T²)). Per micro-turn k: query store → read r_k; refine m_{k+1}=core(m_k,[enc(x),r_k]); emit (logits_k, v_k, halt_logit_k). λ_k=σ(halt_logit_k); PonderNet halting mass p_k=λ_k·∏_{j<k}(1−λ_j), residual on K_max so Σp_k=1; **K_min≥2 floor**.
+
+**COMMIT THE MARGINAL MIXTURE, never a discrete halt sample** (over-determined — forced jointly by PPO pathwise halting gradient, exact teacher-forcing replay in `loss_fn`, and antithetic-CRN preservation in `es.gen_step`): π_commit=Σ_k p_k·softmax(logits_k); sample one env action from π_commit. Compute always runs to K_max (training cost O(T·K_max)); dynamic early-halt is **deploy-only**.
+
+**Loss (PPO):** `logp = log(π_commit[a])` (mixture log-prob → `loss_fn` ratio); + `L_reg = β_p·KL(p_k ‖ Geometric(λ_p))`. Halting is supervised by the **reward-aligned pathwise policy gradient through the mixture**, L_reg as the default profile only. Per-turn `v_k` regressed to GAE return (`L_rec`) as a **gradient shortcut to early turns + consolidation surprise signal — NOT the halting supervisor**.
+**Loss (ES):** fitness = `late_weighted_fitness − c·mean_t E[K]_t`. Marginalization keeps the rollout deterministic in θ given `roll_keys` → CRN intact.
+
+**Calibration knobs — DECLARED HARNESS** (compute-budget regularizers, §1b-3-clean; ⚖ pre-reg numbers): K_max=8, λ_p=0.2 (E[K]=5 ≫ 1), K_min≥2; β_p **constant vs the α-curriculum**, prior **WEIGHT** runs high-warmup-then-anneal (anneal the weight, never λ_p); α=0 loop pre-training before the α-ramp. Adaptivity is **a measured deliverable, never assumed**: report Var(E[K]) across easy/hard lifetimes and lifetime-phase.
+
+### S3-M.2 Fast content-addressed store (Increment B)
+Zero-init member of the **per-lifetime carry** (mirrors `h0`), **vmapped over lifetimes, never scanned, never in θ** → memoryless-across-lifetimes by construction. Leaves `K[N,d_k]`, `V[N,d_v]`, bred usage field `u[N]`.
+- **Read (the hinge — trainable under BOTH routes):** L2-normalize keys+query (cosine/modern-Hopfield β). (1) **HARD top-m SELECT** (`lax.top_k`, m≈16, SVA-faithful, ES-clean). (2) **SOFTMAX-over-the-m VALUE mix** (differentiable → PPO gradient to retrieved keys/values + W_q). **β annealed soft→hard**; PKM BatchNorm-on-query (forward-pass, ES-safe, anti-collapse).
+- **Write (learned; deferred-by-one-step):** uses (h_canon_t, a_t, r_t) arriving as `last_a`/`last_r` in x_{t+1} → executes at start of t+1, **a deterministic fn of `xs` alone** (bit-exact replay, zero extra stored tensors). **delta-rule overwrite-nearest** (prevents averaging-collapse, evicts pre-inference poison, key→value correction).
+- **Eviction:** delta-rule overwrite-nearest (mainline); LRU/DNC-usage as slope-competitors. **§4b observable (always reported next to null-memory ablation):** slot-utilization / usage-entropy.
+- **Canonical space (claim softened):** keys on the post-inference state h_canon, not raw obs; invariance is **emergent (asymptotic within a lifetime), not by construction** — early writes pre-canonical, low-gated, overwritten. Falsifier is phase-conditioned (S3-M.6).
+
+### S3-M.3 BPTT cut / route compatibility
+- **Cross-step h: keep FULL-T BPTT** (it IS the RL² mechanism; do NOT stop-gradient it — that would regress the Phase-1 memoryless-core result).
+- **Store S: truncated-BPTT WINDOWS of length W** (R2D2 burn-in). **W=1** = fast-weight semantics, store-path depth=K_max, regression-safe, ES-trainable, but **PPO gets ~zero write-policy gradient**. **W>1** buys bounded PPO write gradient. Default W=1 on cbandit-FR; W>1 on the memory-demand env. **ES is the legitimate mainline for the memory-write axis** (a valid §1b-1 outcome, not a failure).
+- **Memory:** nested `jax.checkpoint` (step fn + micro-turn scan) → O(B·(T+K)·d); global-norm clip + per-route store-path gnorm logging; γ=0.999 stability escape hatch.
+- **Dual value heads:** GAE critic off the **pre-micro-turn** state with `stop_gradient` on the store; per-turn v_k anchors the loop. `reward_scale` → running value-normalizer.
+- **Honest route comparison:** freeze addressing softness identically across routes; ALSO run PPO with ES's hard reads, report soft-vs-hard delta as a declared confounder; **a route whose store collapsed (usage diagnostic) is DISQUALIFIED, never averaged in.**
+
+### S3-M.4 Selective consolidation — slow bank (Increment C, deferred)
+**Separable, zero-able, stop-gradiented, additively-gated** `params["slow"]` (NAMED pytree subtree, asserted disjoint from the per-lifetime carry). **Shared-weight continual fine-tune (§1d mechanism a) is FORBIDDEN for the gated claim** — it makes the null-memory control structurally unsatisfiable. Read combine: `activation += g_slow·slow_read` → **null-memory ablation = literal one-checkpoint subtraction** (zero `params["slow"]`, rerun identical eval).
+- **Operator:** surprise-then-confirmed (Titans); form FIXED (connector, §4b-legal), params BRED. **Update path:** a NEW `consolidate.py` between blocks of outer-loop updates (outside `epoch_step`/`gen_step`) — EMA/test-time, stop-gradiented, AlphaGo-shaped distillation of converged fast-store contents (reuses the Phase-5 crystallization operator); EWC anchor to the frozen pre-consolidation (= null-memory) core; snapshot the encoder first (stationary target); generative replay via the Crucible.
+- **Discipline:** ONLY at α=1, gated behind interface-inference convergence; **consolidation dropout** (p of lifetimes with `slow` zeroed) makes a store-independent core optimized-for. **"Undiminished" ≝ null-memory removes the experienced-instance speedup (early slope); final-quarter level must match a fresh core.**
+- **Routes:** low-dim/tied operator → ES barely grows; ES ranks, SGD/distillation tunes (R1 flagged weaker). **Gate env: cbandit-FG / dedicated recurring-template env, NEVER cbandit-FR.**
+
+### S3-M.5 Scaling axes — and *where each is load-bearing* (the central staging fix)
+Each ≥3 levels, winner by **slope not intercept** (§1b-1).
+
+| Axis | Levels | Load-bearing env | Route |
+|---|---|---|---|
+| Params | GRU {128,256,512}; S2 later | cbandit-FR (existing ladder) | both |
+| **Micro-turn K_max** | {1,2,4,8} | **cbandit-FR** (compute-bound) | **PPO primary**; ES K-slope reported, never kills alone |
+| **Store size N_slots** | {512,2048,8192} | **DEFERRED off cbandit-FR** → memory-demand env | both, frozen softness |
+| **Lifetime length T** | family-dependent | memory-demand env | both |
+| Consolidation-lifetimes | AlphaGo amortization curve | cbandit-FG / template env | SGD primary |
+
+**Why the deferral:** cbandit-FR (C=5 contexts, fits the 128-d GRU at 0.6216) makes the {512..8192} sweep **flat-by-construction** and the usage-collapse diagnostic **misfire**. So store-size/lifetime slopes are graded on a dedicated memory-demand env (G3-class many-association/T-maze, N_assoc ≫ GRU-capacity, behind interface randomization); prerequisite = a positive store-vs-null delta there first. K_max is the one new axis Phase-1 can honestly test.
+
+### S3-M.6 Null-memory control · leak falsifiers · control taxonomy
+- **Null-memory (§1d-2, mandatory):** zero `params["slow"]`, rerun identical eval; pass = experienced speedup vanishes, level undiminished.
+- **Leak falsifiers:** (a) trainable-pytree leaves **asserted disjoint** from per-lifetime-carry leaves at init; (b) **lifetime-order-invariance** — permute vmap order, every per-lifetime metric bitwise identical; (c) **cross-lifetime probe** — lifetime N optimum = N−1's; above-chance ⇒ leak.
+- **Phase-conditioned canonical probe:** linear decoder store-keys→interface-identity at chance on post-convergence/late-lifetime writes (fast store; early exempt), unconditionally at chance for the consolidation copy. Re-run C7/C8 with consolidation ACTIVE — both must still collapse.
+- **Memory-level taxonomy (extends C5/C6):** micro-turn reset · step(h) reset · episode reset (=C5, + C5-S store-reset) · lifetime reset · consolidation-null. **Fixed-K controls (K=1, K=K_max) mandatory:** if adaptive-K does not beat fixed-K at matched compute, halting is a connector → ship fixed-K (still delivers the compute-per-decision axis).
+
+### S3-M.7 Anchors
+PonderNet (2107.05407) · delta-rule fast-weight programmers (2102.11174) · product-key memory + BN-on-query (1907.05242) · NEC (Pritzel 2017) · MERLIN (1803.10760) · DNC (Graves 2016) · Titans (2501.00663) · EWC (Kirkpatrick 2017) · modern Hopfield β (Ramsauer 2020) · R2D2 burn-in (Kapturowski 2019) · in-house SVA + hourglass (port mechanism to JAX). Provenance: hardening workflow `wf_44c62735-db3` (5 web-grounded red-teams × 3 judged designs + synthesis), 2026-06-13.
+
 ## 6. Outer-loop routes
 
 - **R1 — ES** (evosax: OpenES/SNES, pop 256–1024 ⚖): fitness = late-weighted lifetime
