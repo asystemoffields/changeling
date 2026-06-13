@@ -46,7 +46,9 @@ loss, `−c·mean_t E[K]` into ES fitness. Tiny CPU config (B=4, T=16, K_max=4, 
 If 1–4 pass, Increment B (the store) is unblocked. **Increment A needs none of the Open Decisions
 below** (those gate Increments B/C and the prereg lock).
 
-## Open decisions (need Alex before the PREREG_P1 lock — recommendations given)
+## Open decisions — ALL RATIFIED by Alex 2026-06-13 (each to its recommendation)
+
+**1 → (b) gate to a dedicated S3 mini-phase** (Phase 1 = Increment A looped-core+adaptive-K only, no store). **2 → accept the bracket** (ES is the mainline for the memory-write axis; W=1; PPO-trains-writes is a measured bracket, not a hard requirement). **3 → ratify** the calibration knobs as locked pre-reg numbers. **4 → accept** foreclosing §1d mechanism-(a). Detail + reasoning below.
 
 1. **Where the store-capacity axis is graded.** cbandit-FR can't test N_slots/lifetime
    (flat-by-construction). (a) add a dedicated memory-demand env to Phase-1 now, or (b) ship

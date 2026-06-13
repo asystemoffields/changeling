@@ -2,9 +2,13 @@
 
 **Status: DRAFT.** Produced by a 5-design judge-panel (transfer-honest spine,
 graded 8.0/10; grafts from cold-start-purist, substrate-scaling-first,
-reproduction-first, diversity-transition). Locks **only when Alex resolves the
-Open Decisions below** and the engineering preconditions B1–B5 pass their
-regression gates. No metered (Kaggle) run fires before lock. Builds on the
+reproduction-first, diversity-transition). All Open Decisions are RESOLVED (the 5
+PREREG_P1 forks + the 4 memory-architecture decisions in `reports/memory_arch_risks.md`,
+all ratified 2026-06-13). **Lock is now gated ONLY on the B1–B5 engineering
+preconditions passing** — chiefly the Increment-A integration (collect==forward replay
+assert + G0-A 0.6216 regression). The Phase-1 substrate is the **looped core + adaptive-K
+micro-turns (SPEC §5b Increment A)**; the memory store + consolidation are a separate S3
+mini-phase (decision 1). No metered (Kaggle) run fires before lock. Builds on the
 hardened P0 harness (`reports/gate0.md`) and honors D1 (reference-relative bars),
 D2 (curriculum mixture), D3 (route-objective reconciliation).
 

@@ -142,8 +142,12 @@ standalone [PRIMARY]; (b) an experienced instance beats a fresh one on *recurrin
 (c) the experienced instance still learns *novel* structure from scratch as well as a fresh
 one does (plasticity preserved), and (b) vanishes under the null-memory ablation.
 
-**Mechanism left open (bitter-lesson — decide empirically):** (a) continual outer loop
-(meta-training never stops; deployment experience keeps updating weights); (b) explicit
+**Mechanism — (a) FORECLOSED 2026-06-13 (Alex); decide (b) vs (c) empirically (bitter-lesson).**
+(a) continual outer loop / shared-weight continual fine-tune is **foreclosed for the gated
+claim**: it diffuses consolidated information into the shared trunk, which makes the mandatory
+null-memory ablation (a one-checkpoint subtraction) structurally unsatisfiable and the §1d gate
+vacuous (see §5b/S3-M.4, S3-M.6). Consolidation writes ONLY to a separable, zero-able,
+stop-gradiented slow bank. Remaining choice: (b) explicit
 slow/fast two-weight substrate (fast weights / S3 store do the in-context part, periodic
 consolidation into slow weights — CLS / fast-weight-programmer lineage); (c) online
 crystallization-into-weights (distill the inner loop's reliably-good behavior back into slow
@@ -255,6 +259,13 @@ probes ⚖, run at every gate from Phase 1 on:
 **Status.** v0.1, committable. **Spine = the *minimal-robust* design** (strict superset of the current harness: K_max=1 + zero-store + zero-slow-bank collapses exactly to today's `gru_step`/`collect`/`loss_fn`). Realized in JAX (port the SVA/hourglass *mechanisms* — content-addressed read/write, looped core — to JAX; they are PyTorch, so we reuse the mechanism not the model). Grafts attributed inline: dual value heads and deferred-write-on-RL²-channel from *maximal-ambitious*; literature scaffolding (PonderNet/PKM/NEC/MERLIN/DNC/Titans/EWC) from *literature-faithful*; the **W-window store-BPTT**, **capacity-env staging**, **phase-conditioned probe**, and **reward-aligned halting supervision** are synthesizer additions. Folds into the PREREG_P1 **B1** abstract-`step_fn` refactor; honors §1d ordering, §1b bitter-lesson, §4b (memory = connectors, not cognition). Build follows `reports/memory_arch_risks.md` (binding risk register + first increment).
 
 ### S3-M.0 Sequencing (binding, mirrors §1d)
+**Scope ratified 2026-06-13 (Alex, decision 1):** **Phase 1 ships Increment A ONLY** (looped
+core + adaptive-K micro-turns, NO store). Increments **B (store) + C (consolidation) are gated
+to a dedicated S3 mini-phase** with its own memory-demand env — cbandit-FR cannot test store
+capacity (flat-by-construction, S3-M.5). Calibration knobs (S3-M.1) are **ratified pre-reg
+numbers**, not ⚖. Write-route: **ES is the legitimate mainline for the memory-write axis** (the
+W=1 bracket, decision 2) — "PPO trains writes" is a measured bracket, not a hard requirement.
+
 1. **Increment A — looped core + adaptive-K (no store, no slow bank).** Weight-tied core run K_max micro-turns/env-step, PonderNet-marginalized. Ships into Phase-1 cbandit-FR; the **compute-per-decision (K_max) axis** is the only memory/compute axis Phase-1 can exercise (interface inference is compute-bound, not capacity-bound).
 2. **Increment B — fast content-addressed store.** A per-lifetime-carry member. Its **capacity (N_slots) and lifetime-length slopes are NOT graded on cbandit-FR** (S3-M.5) — graded on a dedicated memory-demand env.
 3. **Increment C — selective consolidation (slow bank).** Strictly-additive, zero-able, deferred until the memoryless core is excellent standalone at α=1. Never a Phase-1 crutch.
