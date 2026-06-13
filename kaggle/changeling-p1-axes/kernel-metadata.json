@@ -1,0 +1,13 @@
+{
+  "id": "asystemoffields/changeling-p1-axes",
+  "title": "changeling-p1-axes",
+  "code_file": "kernel.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_internet": false,
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": []
+}
