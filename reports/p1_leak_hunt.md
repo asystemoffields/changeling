@@ -58,8 +58,15 @@ continuous P ⇒ collision measure-zero — novelty is over P and (P,perm) pairi
 perms); CRN intact (interface drawn once/gen, shared across the antithetic population);
 norm-preservation / κ=1 (asserted).
 
-## Cheap un-metered guards to add before metered Gate-1
-(1) resume-asymmetry test (save `alpha_obs=0`, resume without it ⇒ must RAISE);
-(2) C8-at-chance test on cbandit-FR; (3) obs-axis necessity micro-assert (context-blind
-policy ≤ chance+ε — analytic best context-blind metric = 1/C = 0.2 ≪ 0.69 bar);
-(4) C7-P/C7-π smoke cells under CHANGELING_SMOKE=1.
+## Cheap un-metered guards — ALL DONE 2026-06-13
+(1) **resume-asymmetry** — `test_interface.py` T8 (drop `alpha_obs` ⇒ RAISES). ✅
+(2) **C8-at-chance** — `test_interface.py` T7 (untrained C8 q4=0.107 ≤ chance). ✅
+(3) **obs-axis necessity** — context-blind policies on cbandit-FR max at 0.203 (best
+    fixed arm = 1/C = 0.2; uniform = 0.124), ≪ the 0.69 G1-A bar ⇒ the bar cannot be
+    cleared without in-context obs binding. Matches analytic exactly. ✅
+(4) **C7-P/C7-π smoke** — `build_kernel.py --route p1axes` CPU smoke (4 cells train,
+    verdict logic correct). ✅
+
+## Follow-up status (2026-06-13)
+All 3 binding findings CLOSED: C8 (`5968b34`), bidirectional resume (`5968b34`),
+single-axis cells (`589bcee`). Harness is Gate-1-ready for the cold-start mainline.
