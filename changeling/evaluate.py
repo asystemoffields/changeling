@@ -15,16 +15,16 @@ from .rollout import rollout
 EVAL_FOLD = 10_000_000
 
 
-def eval_suite(env, params, n=100, seed=0, c4=False, c5=False, c6=False):
+def eval_suite(env, params, n=100, seed=0, c4=False, c5=False, c6=False, step=None):
     key = jax.random.fold_in(jax.random.PRNGKey(seed), EVAL_FOLD)
     kt, kr = jax.random.split(key)
     tasks = jax.vmap(env["sample_task"])(jax.random.split(kt, n))
     keys = jax.random.split(kr, n)
 
     def one(task, k):
-        return rollout(env, params, task, k, c4=c4, c5=c5, c6=c6)
+        return rollout(env, params, task, k, c4=c4, c5=c5, c6=c6, step=step)
 
-    rewards, metrics, dones = jax.vmap(one)(tasks, keys)  # (n, T)
+    rewards, metrics, dones, e_ks = jax.vmap(one)(tasks, keys)  # (n, T)
     T = rewards.shape[1]
     q = T // 4
     q1, q4 = rewards[:, :q], rewards[:, -q:]
@@ -43,6 +43,10 @@ def eval_suite(env, params, n=100, seed=0, c4=False, c5=False, c6=False):
         slope_pos_frac=n_pos / max(n_eff, 1),
         slope_sign_p=_binom_tail(n_pos, n_eff),
         gate_q4=float(gate_q4),
+        # K-collapse observable (risk #2): mean adaptive-K over the lifetime.
+        # ≡1.0 on the legacy substrate; the tripwire wants final-quarter E[K]>1.5.
+        e_k_mean=float(e_ks.mean()),
+        e_k_q4=float(e_ks[:, -q:].mean()),
     )
 
 
@@ -54,11 +58,12 @@ def _binom_tail(k, n):
     return sum(comb(n, i) for i in range(k, n + 1)) / 2 ** n
 
 
-def full_eval(env, params, n=100, seed=0):
-    """Main condition plus PREREG controls."""
+def full_eval(env, params, n=100, seed=0, step=None):
+    """Main condition plus PREREG controls. `step` is a B1 step_fn (looped path);
+    None grades the legacy gru substrate."""
     return dict(
-        main=eval_suite(env, params, n, seed),
-        c4_coin_reward=eval_suite(env, params, n, seed, c4=True),
-        c5_no_memory=eval_suite(env, params, n, seed, c5=True),
-        c6_full_amnesia=eval_suite(env, params, n, seed, c6=True),
+        main=eval_suite(env, params, n, seed, step=step),
+        c4_coin_reward=eval_suite(env, params, n, seed, c4=True, step=step),
+        c5_no_memory=eval_suite(env, params, n, seed, c5=True, step=step),
+        c6_full_amnesia=eval_suite(env, params, n, seed, c6=True, step=step),
     )

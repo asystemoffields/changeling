@@ -25,13 +25,20 @@ from jax.flatten_util import ravel_pytree
 
 from . import IN_DIM, N_ACT
 from .agent import gru_step, init_gru, hidden_size
+from .looped import init_looped, make_step, kl_to_geometric
 from .es import adam_init, adam_ascend
 from .envs import ENVS
 from .evaluate import full_eval
 from .train import save_ckpt, load_ckpt, _flat, _log, assert_resume_cfg, assert_pure_gate
 
 
-def init_ppo_params(key, hidden=128):
+def init_ppo_params(key, hidden=128, cfg=None):
+    """Legacy: a plain GRU core + a separate top-level value head (a training-only
+    connector). Looped (cfg['loop']): the looped core, whose halt+value heads live
+    INSIDE params['gru'] — commit_v IS the state-value, so no top-level Wv/bv."""
+    cfg = cfg or {}
+    if cfg.get("loop", False):
+        return {"gru": init_looped(key, hidden)}
     kg, kv = jax.random.split(key)
     return {
         "gru": init_gru(kg, hidden),
@@ -40,12 +47,16 @@ def init_ppo_params(key, hidden=128):
     }
 
 
-def collect(env, params, task, key, reward_scale):
+def collect(env, params, task, key, reward_scale, step, loop):
     """One lifetime under the current policy. Returns everything the loss
     needs to recompute the forward pass exactly (teacher forcing on xs).
     Rewards come back late-weighted (PREREG_P0 selection pressure) and
     scaled so discounted returns are O(1) — otherwise the value-loss
-    gradient through the shared trunk drowns the policy gradient."""
+    gradient through the shared trunk drowns the policy gradient.
+
+    `step` is a B1 step_fn (looped.make_step). Legacy: sample from raw logits,
+    value from the top-level head — byte-identical to the pre-B1 collect. Looped:
+    sample from the marginal commit dist; the state-value IS commit_v."""
     T = env["T"]
     key, k0 = jax.random.split(key)
     state0, obs0 = env["reset"](k0, task)
@@ -57,10 +68,9 @@ def collect(env, params, task, key, reward_scale):
         h, state, obs, last_a, last_r, boundary, key = carry
         key, ka, kr, kres = jax.random.split(key, 4)
         x = jnp.concatenate([obs, last_a, jnp.array([last_r, boundary])])
-        h, logits = gru_step(params["gru"], h, x)
-        logp_all = jax.nn.log_softmax(logits)
-        a = jax.random.categorical(ka, logits)
-        v = (h @ params["Wv"] + params["bv"])[0]
+        h, sample_score, logp_all, value, aux = step(params["gru"], h, x)
+        a = jax.random.categorical(ka, sample_score)
+        v = value if loop else (h @ params["Wv"] + params["bv"])[0]
         state, obs, r, done, _ = env["step"](state, a, kr, task)
         rs_state, rs_obs = env["reset"](kres, task)
         state = jax.tree_util.tree_map(
@@ -94,6 +104,15 @@ def make_update_step(env, unravel, cfg):
     gamma, lam = cfg["gamma"], cfg["lam"]
     clip, vf_c, ent_c = cfg["clip"], cfg["vf_coef"], cfg["ent_coef"]
 
+    # B1 looped substrate (trace-time branch: loop=False emits the exact legacy
+    # graph). When loop=True the policy is the marginal commit mixture, the value
+    # is per-turn v_k reconstructed (PonderNet L_rec), and a KL-to-geometric prior
+    # (weight kl_coef) regularizes the halting distribution toward E[K]=1/lam_p.
+    loop = cfg.get("loop", False)
+    step = make_step(cfg)
+    k_max, k_min = int(cfg.get("k_max", 1)), int(cfg.get("k_min", 2))
+    lam_p, kl_c = float(cfg.get("lam_p", 0.2)), float(cfg.get("kl_coef", 0.0))
+
     rew_scale = cfg.get("reward_scale", 1.0 - cfg["gamma"])
     # D3 landmine: at gamma=1.0 (route-reconciled config) the default 1-gamma=0
     # would zero every training reward. Require an explicit positive scale.
@@ -108,7 +127,8 @@ def make_update_step(env, unravel, cfg):
         tasks = jax.vmap(env["sample_task"])(jax.random.split(kt, n_life))
         keys = jax.random.split(kr, n_life)
         xs, acts, logps, vals, rews = jax.vmap(
-            lambda t, k: collect(env, params, t, k, rew_scale))(tasks, keys)
+            lambda t, k: collect(env, params, t, k, rew_scale, step, loop))(
+                tasks, keys)
         adv, rets = jax.vmap(lambda r, v: gae(r, v, gamma, lam))(rews, vals)
         adv = (adv - adv.mean()) / (adv.std() + 1e-8)
         return xs, acts, logps, adv, rets
@@ -118,16 +138,39 @@ def make_update_step(env, unravel, cfg):
         xs, acts, logps_old, adv, rets = batch
         h0 = jnp.zeros(hidden_size(params["gru"]))
 
-        def forward(xs_one):
-            def step(h, x):
-                h, logits = gru_step(params["gru"], h, x)
-                v = (h @ params["Wv"] + params["bv"])[0]
-                return h, (logits, v)
-            _, (logits, v) = jax.lax.scan(step, h0, xs_one)
-            return logits, v
+        if loop:
+            def forward(xs_one):
+                def st(h, x):
+                    h, _ss, logp_all, value, aux = step(params["gru"], h, x)
+                    return h, (logp_all, value, aux["p"], aux["v_k"], aux["E_K"])
+                _, outs = jax.lax.scan(st, h0, xs_one)
+                return outs  # (logp_all, v, p, v_k, E_K)
 
-        logits, v = jax.vmap(forward)(xs)  # (B,T,K), (B,T)
-        logp_all = jax.nn.log_softmax(logits)
+            logp_all, v, p, v_k, e_k = jax.vmap(forward)(xs)
+            #   logp_all (B,T,A)  v (B,T)  p (B,T,K)  v_k (B,T,K)  e_k (B,T)
+            logp = jnp.take_along_axis(logp_all, acts[..., None], -1)[..., 0]
+            ratio = jnp.exp(logp - logps_old)
+            pg = jnp.minimum(ratio * adv,
+                             jnp.clip(ratio, 1 - clip, 1 + clip) * adv).mean()
+            # per-turn value reconstruction, halting-weighted (PonderNet L_rec):
+            # each micro-turn's value head is regressed to the lifetime return,
+            # weighted by that turn's commit mass p_k.
+            vloss = (p * (v_k - rets[..., None]) ** 2).sum(-1).mean()
+            ent = -(jnp.exp(logp_all) * logp_all).sum(-1).mean()
+            kl_fn = lambda pp: kl_to_geometric(pp, lam_p, k_max, k_min)
+            klr = jax.vmap(jax.vmap(kl_fn))(p).mean()
+            loss = -(pg - vf_c * vloss + ent_c * ent) + kl_c * klr
+            return loss, dict(pg=pg, v=vloss, ent=ent, kl=klr, e_k=e_k.mean())
+
+        def forward(xs_one):
+            def st(h, x):
+                h, _ss, logp_all, _value, _aux = step(params["gru"], h, x)
+                v = (h @ params["Wv"] + params["bv"])[0]
+                return h, (logp_all, v)
+            _, (logp_all, v) = jax.lax.scan(st, h0, xs_one)
+            return logp_all, v
+
+        logp_all, v = jax.vmap(forward)(xs)  # (B,T,A), (B,T)
         logp = jnp.take_along_axis(logp_all, acts[..., None], -1)[..., 0]
         ratio = jnp.exp(logp - logps_old)
         pg = jnp.minimum(ratio * adv,
@@ -160,16 +203,18 @@ def train_ppo(config, resume=None):
     print(f"R2 grades gate on eval_env={eval_env['name']} "
           f"kwargs={config.get('eval_env_kwargs', config.get('env_kwargs', {}))}")
 
+    step = make_step(config)
+
     if resume:
         theta, adam_state, key, start_up, saved_cfg, best_gate = load_ckpt(resume)
         assert_resume_cfg(saved_cfg, config)
         _, unravel = ravel_pytree(
-            init_ppo_params(jax.random.PRNGKey(0), config["hidden"]))
+            init_ppo_params(jax.random.PRNGKey(0), config["hidden"], config))
         print(f"resumed update={start_up} from {resume} (best_gate={best_gate:.3f})")
     else:
         key = jax.random.PRNGKey(config["seed"])
         key, ki = jax.random.split(key)
-        theta, unravel = ravel_pytree(init_ppo_params(ki, config["hidden"]))
+        theta, unravel = ravel_pytree(init_ppo_params(ki, config["hidden"], config))
         adam_state = adam_init(theta.shape[0])
         start_up = 0
         best_gate = -1.0
@@ -198,11 +243,14 @@ def train_ppo(config, resume=None):
                        loss=float(loss), pg=float(aux["pg"]),
                        vloss=float(aux["v"]), ent=float(aux["ent"]),
                        gnorm=float(aux["gnorm"]))
+            if "kl" in aux:  # looped substrate diagnostics
+                row["kl"] = float(aux["kl"])
+                row["e_k"] = float(aux["e_k"])
             _log(out, row)
             print(row)
         if (up + 1) % config["eval_every"] == 0 or up + 1 == config["updates"]:
             ev = full_eval(eval_env, unravel(theta)["gru"], n=config["eval_n"],
-                           seed=config["seed"])
+                           seed=config["seed"], step=step)
             _log(out, dict(update=up, **_flat(ev)))
             print(f"  eval u{up}: main={ev['main']} "
                   f"c4={ev['c4_coin_reward']['gate_q4']:.3f} "

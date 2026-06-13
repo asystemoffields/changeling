@@ -934,12 +934,12 @@ def train_ppo(config, resume=None):
     return theta, unravel
 
 
-# ===== kernel main (route: ppo) =====
+# ===== kernel main (route: es) =====
 if __name__ == "__main__":
     import glob
     import os
 
-    ROUTE = "ppo"
+    ROUTE = "es"
     GATE_BANDIT = 0.672  # 0.90 x Thompson reference 0.747 (PREREG deviation D1)
     smoke = os.environ.get("CHANGELING_SMOKE") == "1"
     print("jax devices:", jax.devices())
@@ -981,11 +981,11 @@ if __name__ == "__main__":
         jobs = [(n, dict(d, **{gens_key: 5})) for n, d in jobs]
 
     for name, extra in jobs:
-        cfg = dict(env=name, out=f"{base}/gate_{name}_ppo",
+        cfg = dict(env=name, out=f"{base}/gate_{name}_es",
                    max_seconds=WALL_BUDGET - (time.time() - wall_start),
                    **common, **extra)
-        resume = find_resume(f"gate_{name}_ppo")
-        print(f"\n##### {name} [ppo]: resume={resume}")
+        resume = find_resume(f"gate_{name}_es")
+        print(f"\n##### {name} [es]: resume={resume}")
         if resume is None and os.path.isdir("/kaggle/input"):
             for cur, dirs, files in os.walk("/kaggle/input"):
                 d = cur.count(os.sep) - 2
@@ -996,7 +996,7 @@ if __name__ == "__main__":
         params = unravel(theta) if ROUTE == "es" else unravel(theta)["gru"]
         ev = full_eval(ENVS[name](), params, n=cfg["eval_n"], seed=cfg["seed"])
         m, c4, c5 = ev["main"], ev["c4_coin_reward"], ev["c5_no_memory"]
-        print(f"\n=== GATE 0 verdict: {name} [ppo] ===")
+        print(f"\n=== GATE 0 verdict: {name} [es] ===")
         if name == "bandit":
             print(f"G0-A gate_q4={m['gate_q4']:.3f} (>={GATE_BANDIT}, D1):",
                   "PASS" if m["gate_q4"] >= GATE_BANDIT else "FAIL")

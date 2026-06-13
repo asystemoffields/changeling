@@ -17,10 +17,21 @@ import jax.numpy as jnp
 
 from . import N_ACT
 from .agent import gru_step, hidden_size
+from .looped import make_step
+
+# Default substrate = the legacy gru step. make_step({}) returns sample_score =
+# RAW logits, so categorical(key, sample_score) draws the same action bit-for-bit
+# as the pre-B1 harness — rollout(step=None) is byte-identical to the old code.
+_LEGACY_STEP = make_step({})
 
 
-def rollout(env, params, task, key, c4=False, c5=False, c6=False):
-    """Returns (rewards, metrics, dones) arrays of shape (T,)."""
+def rollout(env, params, task, key, c4=False, c5=False, c6=False, step=None):
+    """Returns (rewards, metrics, dones, e_ks) arrays of shape (T,). `e_ks` is the
+    per-step E[K] micro-turn count (all-ones on the legacy/loop=False substrate);
+    it is the K-collapse observable and feeds the ES ponder cost. `step` is a B1
+    step_fn from looped.make_step; None -> the legacy gru path."""
+    if step is None:
+        step = _LEGACY_STEP
     if c6:
         c5 = True
     T = env["T"]
@@ -37,8 +48,8 @@ def rollout(env, params, task, key, c4=False, c5=False, c6=False):
         if c6:
             last_a, r_in = jnp.zeros_like(last_a), jnp.float32(0.0)
         x = jnp.concatenate([obs, last_a, jnp.array([r_in, boundary])])
-        h, logits = gru_step(params, h, x)
-        a = jax.random.categorical(ka, logits)
+        h, sample_score, _logp_all, _v, aux = step(params, h, x)
+        a = jax.random.categorical(ka, sample_score)
         state, obs, r, done, metric = env["step"](state, a, kr, task)
         # auto-reset on episode end, same task
         rs_state, rs_obs = env["reset"](kres, task)
@@ -49,10 +60,11 @@ def rollout(env, params, task, key, c4=False, c5=False, c6=False):
             h = h * (1.0 - done.astype(jnp.float32))
         carry = (h, state, obs, jax.nn.one_hot(a, N_ACT), r,
                  done.astype(jnp.float32), key)
-        return carry, (r, metric, done.astype(jnp.float32))
+        return carry, (r, metric, done.astype(jnp.float32), aux["E_K"])
 
-    _, (rewards, metrics, dones) = jax.lax.scan(step_fn, carry0, None, length=T)
-    return rewards, metrics, dones
+    _, (rewards, metrics, dones, e_ks) = jax.lax.scan(
+        step_fn, carry0, None, length=T)
+    return rewards, metrics, dones, e_ks
 
 
 def late_weighted_fitness(rewards):

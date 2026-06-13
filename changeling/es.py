@@ -34,16 +34,21 @@ def adam_ascend(theta, grad, st, lr, b1=0.9, b2=0.999, eps=1e-8):
 
 
 def make_gen_step(env, unravel, pop, n_lifetimes, sigma, lr,
-                  fitness_fn=late_weighted_fitness):
-    """Returns jitted (theta, adam_state, key) -> (theta', adam_state', stats)."""
+                  fitness_fn=late_weighted_fitness, step=None, ponder_cost=0.0):
+    """Returns jitted (theta, adam_state, key) -> (theta', adam_state', stats).
+
+    `step` is a B1 step_fn (looped.make_step); None -> legacy gru. `ponder_cost`
+    is the −c·mean_t E[K] compute tax folded into ES fitness (the adaptive-K
+    pressure). ponder_cost=0.0 + legacy step keeps member_fitness bitwise-identical
+    to the pre-B1 harness (e_k≡1, and f − 0.0·1.0 == f), so G0-A reproduces."""
     assert pop % 2 == 0
 
     def member_fitness(theta_flat, tasks, roll_keys):
         params = unravel(theta_flat)
 
         def one(task, k):
-            rewards, _, _ = rollout(env, params, task, k)
-            return fitness_fn(rewards)
+            rewards, _, _, e_ks = rollout(env, params, task, k, step=step)
+            return fitness_fn(rewards) - ponder_cost * e_ks.mean()
 
         return jax.vmap(one)(tasks, roll_keys).mean()
 

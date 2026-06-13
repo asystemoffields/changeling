@@ -8,10 +8,19 @@ import jax.numpy as jnp
 import numpy as np
 
 from .agent import init_gru
+from .looped import init_looped, make_step
 from .es import adam_init, flatten_params, make_gen_step
 from .evaluate import full_eval
 from .envs import ENVS
 from .rollout import FITNESS
+
+
+def init_core(key, config):
+    """The R1 substrate params: looped core (halt+value heads) when config['loop'],
+    else the plain GRU. The looped path is a strict superset (K_max=1 ≡ GRU)."""
+    if config.get("loop", False):
+        return init_looped(key, hidden=config["hidden"])
+    return init_gru(key, hidden=config["hidden"])
 
 
 def save_ckpt(path, theta, adam_state, key, gen, config, best_gate=-1.0):
@@ -79,28 +88,33 @@ def train(config, resume=None):
                                                 config.get("env_kwargs", {})))
     assert_pure_gate(config, eval_env)
 
+    step = make_step(config)
+    ponder_cost = config.get("ponder_cost", 0.0)
+
     if resume:
         theta, adam_state, key, start_gen, saved_cfg, best_gate = load_ckpt(resume)
         assert_resume_cfg(saved_cfg, config)
         _, unravel = flatten_params(
-            init_gru(jax.random.PRNGKey(0), hidden=config["hidden"]))
+            init_core(jax.random.PRNGKey(0), config))
         print(f"resumed gen={start_gen} from {resume} (best_gate={best_gate:.3f})")
     else:
         key = jax.random.PRNGKey(config["seed"])
         key, ki = jax.random.split(key)
-        params = init_gru(ki, hidden=config["hidden"])
+        params = init_core(ki, config)
         theta, unravel = flatten_params(params)
         adam_state = adam_init(theta.shape[0])
         start_gen = 0
         best_gate = -1.0
         # C1 control: the random-init agent's eval, logged once up front
-        c1 = full_eval(eval_env, unravel(theta), n=config["eval_n"], seed=config["seed"])
+        c1 = full_eval(eval_env, unravel(theta), n=config["eval_n"],
+                       seed=config["seed"], step=step)
         _log(out, dict(gen=-1, condition="c1_random_init", **_flat(c1)))
 
     gen_step = make_gen_step(env, unravel, config["pop"],
                              config["n_lifetimes"], config["sigma"],
                              config["lr"],
-                             fitness_fn=FITNESS[config.get("fitness", "late")])
+                             fitness_fn=FITNESS[config.get("fitness", "late")],
+                             step=step, ponder_cost=ponder_cost)
     print(f"env={env['name']} dim={theta.shape[0]} pop={config['pop']} "
           f"M={config['n_lifetimes']} T={env['T']}")
     print(f"R1 grades gate on eval_env={eval_env['name']} "
@@ -130,7 +144,7 @@ def train(config, resume=None):
             print(row)
         if (gen + 1) % config["eval_every"] == 0 or gen + 1 == config["gens"]:
             ev = full_eval(eval_env, unravel(theta), n=config["eval_n"],
-                           seed=config["seed"])
+                           seed=config["seed"], step=step)
             _log(out, dict(gen=gen, **_flat(ev)))
             print(f"  eval g{gen}: main={ev['main']} "
                   f"c4={ev['c4_coin_reward']['gate_q4']:.3f} "

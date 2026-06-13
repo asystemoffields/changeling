@@ -46,6 +46,37 @@ loss, `−c·mean_t E[K]` into ES fitness. Tiny CPU config (B=4, T=16, K_max=4, 
 If 1–4 pass, Increment B (the store) is unblocked. **Increment A needs none of the Open Decisions
 below** (those gate Increments B/C and the prereg lock).
 
+### STATUS — Increment A COMPLETE (2026-06-13)
+
+Built: `changeling/looped.py` (`init_looped`, `_ponder_p`, `geometric_prior`,
+`kl_to_geometric`, `micro_loop`, `make_step`); abstract step_fn threaded through
+`rollout`/`es`/`evaluate`/`train`/`ppo` (B1 of PREREG_P1 §0). All 4 gates pass —
+`scripts/test_increment_a.py` (18/18):
+- **G1 LYNCHPIN** — collect-vs-forward commit-logp **max|Δ| = 0.0 (bitwise)**, not
+  just <1e-5; commit_v replay also bitwise. The marginalize-don't-sample design is
+  exactly replay-pure, so the PPO ratio starts at 1.0 with zero drift.
+- **G2 regression** — `loop=False` rollout is **bitwise-identical** to the literal
+  pre-B1 GRU rollout (rewards/metrics/dones) ⇒ **G0-A = 0.6216 reproduces exactly**;
+  `step=None` routes to the same path; K_max=1 looped ≡ a single GRU step.
+- **G3 CRN/grad** — ES (looped+legacy) gen_step and PPO (looped+legacy) epoch_step
+  NaN-free, finite gnorm; member-fitness **bitwise-deterministic** under fixed
+  roll_keys (antithetic CRN survives marginalization); legacy PPO graph carries no
+  KL key (exact legacy graph preserved).
+- **G4 loop exercised** — looped eval E[K]_mean ≈ 2.8 (k_max=4) ≫ 1.5; legacy ≡ 1.0.
+
+Also verified end-to-end (not just unit gates): ES + PPO **looped** train + ckpt
+**resume** roundtrip clean (E[K]≈2.8 sustained); both Kaggle kernels rebuild with
+`looped.py` bundled (build_kernel now drops each module's `__main__` self-test so the
+bundled kernel doesn't sys.exit) and pass CPU smoke with `e_k_mean=1.0` on the legacy
+substrate.
+
+**Bug caught + fixed during build:** `init_looped` had overwritten the GRU candidate
+bias `p["bh"]` (shape (H,)) with the halt-head bias `zeros(1)` — a silent
+param-name collision that tied two unrelated parameters into one corrupted (1,)
+scalar the moment training began (the 9/9 standalone test missed it because both are
+zero at init). Halt head renamed `Whalt`/`bhalt`; a shape assert is now in the
+self-test.
+
 ## Open decisions — ALL RATIFIED by Alex 2026-06-13 (each to its recommendation)
 
 **1 → (b) gate to a dedicated S3 mini-phase** (Phase 1 = Increment A looped-core+adaptive-K only, no store). **2 → accept the bracket** (ES is the mainline for the memory-write axis; W=1; PPO-trains-writes is a measured bracket, not a hard requirement). **3 → ratify** the calibration knobs as locked pre-reg numbers. **4 → accept** foreclosing §1d mechanism-(a). Detail + reasoning below.

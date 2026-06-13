@@ -4,13 +4,16 @@
 graded 8.0/10; grafts from cold-start-purist, substrate-scaling-first,
 reproduction-first, diversity-transition). All Open Decisions are RESOLVED (the 5
 PREREG_P1 forks + the 4 memory-architecture decisions in `reports/memory_arch_risks.md`,
-all ratified 2026-06-13). **Lock is now gated ONLY on the B1–B5 engineering
-preconditions passing** — chiefly the Increment-A integration (collect==forward replay
-assert + G0-A 0.6216 regression). The Phase-1 substrate is the **looped core + adaptive-K
-micro-turns (SPEC §5b Increment A)**; the memory store + consolidation are a separate S3
-mini-phase (decision 1). No metered (Kaggle) run fires before lock. Builds on the
-hardened P0 harness (`reports/gate0.md`) and honors D1 (reference-relative bars),
-D2 (curriculum mixture), D3 (route-objective reconciliation).
+all ratified 2026-06-13). **Lock is gated ONLY on the B1–B5 engineering
+preconditions.** Status: **B1 DONE** (substrate-agnostic step + looped core; G0-A
+0.6216 regression and collect==forward replay both bitwise; 18/18 in
+`scripts/test_increment_a.py`), **B4 DONE** (2026-06-12). **Remaining: B2** (interface
+randomization module) **and B3** (cbandit-FR/FG env family); **B5** (resume asserts on
+the interface keys) confirmable once B2/B3 add those keys. The Phase-1 substrate is the
+**looped core + adaptive-K micro-turns (SPEC §5b Increment A)**; the memory store +
+consolidation are a separate S3 mini-phase (decision 1). No metered (Kaggle) run fires
+before lock. Builds on the hardened P0 harness (`reports/gate0.md`) and honors D1
+(reference-relative bars), D2 (curriculum mixture), D3 (route-objective reconciliation).
 
 **Scope (SPEC §1d).** Phase 1 is the **memoryless core** — in-context interface
 inference carrying *nothing across lifetimes*. The consolidation / neuroplasticity
@@ -66,11 +69,21 @@ curriculum claim must be re-established at scale, not assumed.
 
 ## 0. Engineering preconditions (build before any metered run)
 
-- **B1 — substrate-agnostic step interface.** `rollout.py`/`ppo.py` are GRU-shaped
-  (`gru_step`, `hidden_size`). Refactor to an abstract `step_fn(params, carry, x) ->
-  (carry, logits[, value])` + `init_substrate`; GRU and the new transformer both
-  implement it. **Regression gate: the GRU path must reproduce G0-A = 0.6216 exactly**
-  before S2 work proceeds.
+- **B1 — substrate-agnostic step interface. DONE 2026-06-13.** `looped.make_step(cfg)`
+  returns a pure `step(params, h, x) -> (h_new, sample_score, logp_all, value, aux)`,
+  threaded through `rollout`/`es`/`evaluate`/`train`/`ppo`. The signature is richer
+  than the original `-> (carry, logits[, value])` sketch because the looped substrate
+  commits a *marginal mixture* (`commit_logp`), which is not the softmax of any single
+  logit vector — `sample_score` is what `categorical` consumes (raw logits for GRU,
+  `commit_logp` for looped), `logp_all` is the action log-prob vector, `value` is
+  `commit_v` (looped) or None (legacy computes from its top head), `aux` carries E[K].
+  **Substrate decision: the Phase-1 substrate is the looped GRU core + adaptive-K
+  (SPEC §5b Increment A), NOT a from-scratch transformer** — superseding this row's
+  earlier "new transformer" sketch, per the ratified memory-architecture decision
+  (reports/memory_arch_risks.md). **Regression gate MET — bitwise:** `loop=False` is
+  byte-identical to the pre-B1 GRU path, so G0-A = 0.6216 reproduces exactly; the
+  collect==forward replay lynchpin is also bitwise (max|Δ|=0.0). All 4 Increment-A
+  gates pass (`scripts/test_increment_a.py`, 18/18).
 - **B2 — interface module `interface.py`.** `sample_interface(key, alpha) -> (P, pi)`;
   applied inside `rollout()` and `ppo.collect()` to the padded obs and emitted action.
   Interface is part of the per-lifetime `task` (keyed sampling) so held-out eval draws

@@ -17,9 +17,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 PKG = ROOT / "changeling"
-ORDER = ["__init__.py", "envs.py", "agent.py", "rollout.py", "es.py",
+# looped.py must precede rollout/es/train/ppo (they import make_step from it) and
+# follow agent.py (it imports gru_step/init_gru). Module self-tests are dropped
+# (see build()): the bundled kernel runs as __main__, so any module's
+# `if __name__ == "__main__":` block would otherwise fire and sys.exit the kernel.
+ORDER = ["__init__.py", "envs.py", "agent.py", "looped.py", "rollout.py", "es.py",
          "evaluate.py", "train.py", "ppo.py"]
 INTRA = re.compile(r"^\s*from \.\S* import |^\s*from \. import ")
+MAIN_GUARD = re.compile(r"^if __name__ ==")
 
 MAIN = '''
 
@@ -112,9 +117,14 @@ def build(route, session=1, updates=8000, mix=0.0, ent=None, tag=""):
              'scripts/build_kernel.py; do not edit by hand. See SPEC.md / '
              'PREREG_P0.md in the repo."""']
     for fname in ORDER:
-        body = "\n".join(l for l in (PKG / fname).read_text().splitlines()
-                         if not INTRA.match(l))
-        parts.append(f"\n# ===== changeling/{fname} =====\n{body}")
+        lines = []
+        for l in (PKG / fname).read_text().splitlines():
+            if MAIN_GUARD.match(l):
+                break  # drop the module self-test (kernel runs as __main__)
+            if INTRA.match(l):
+                continue
+            lines.append(l)
+        parts.append(f"\n# ===== changeling/{fname} =====\n" + "\n".join(lines))
     parts.append(MAIN.format(route=route, updates=updates, mix=mix,
                              ent_coef=ent if ent is not None else 0.01))
     out_dir = ROOT / "kaggle" / slug
