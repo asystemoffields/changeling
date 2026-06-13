@@ -56,7 +56,7 @@ if __name__ == "__main__":
         common = dict(hidden=128, n_lifetimes=64, lr=5e-4, gamma=0.99,
                       lam=0.95, clip=0.2, epochs=4, vf_coef=0.5,
                       ent_coef={ent_coef}, max_grad_norm=0.5, seed=0,
-                      eval_n=100, eval_every=250, log_every=50,
+                      eval_n=200, eval_every=250, log_every=50,
                       ckpt_every=250)
         jobs = [("bandit", dict(updates={updates}, stop_gate=GATE_BANDIT,
                                 stop_slope_pos=True,
@@ -75,6 +75,12 @@ if __name__ == "__main__":
                    **common, **extra)
         resume = find_resume(f"gate_{{name}}_{route}")
         print(f"\\n##### {{name}} [{route}]: resume={{resume}}")
+        if resume is None and os.path.isdir("/kaggle/input"):
+            for cur, dirs, files in os.walk("/kaggle/input"):
+                d = cur.count(os.sep) - 2
+                print("  " * d + cur, files[:8])
+                if d >= 3:
+                    dirs[:] = []
         theta, unravel = trainer(cfg, resume=resume)
         params = unravel(theta) if ROUTE == "es" else unravel(theta)["gru"]
         ev = full_eval(ENVS[name](), params, n=cfg["eval_n"], seed=cfg["seed"])

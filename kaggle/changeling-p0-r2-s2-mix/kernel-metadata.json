@@ -1,0 +1,15 @@
+{
+  "id": "asystemoffields/changeling-p0-r2-s2-mix",
+  "title": "changeling-p0-r2-s2-mix",
+  "code_file": "kernel.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_internet": false,
+  "dataset_sources": [
+    "asystemoffields/changeling-ckpts"
+  ],
+  "competition_sources": [],
+  "kernel_sources": []
+}

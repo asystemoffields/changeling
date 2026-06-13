@@ -166,6 +166,7 @@ def train_ppo(config, resume=None):
     max_seconds = config.get("max_seconds")
     stop_gate = config.get("stop_gate")
     stop_slope_pos = config.get("stop_slope_pos", False)
+    best_gate = -1.0
 
     t0 = time.time()
     for up in range(start_up, config["updates"]):
@@ -191,6 +192,11 @@ def train_ppo(config, resume=None):
             print(f"  eval u{up}: main={ev['main']} "
                   f"c4={ev['c4_coin_reward']['gate_q4']:.3f} "
                   f"c5={ev['c5_no_memory']['gate_q4']:.3f}")
+            if ev["main"]["gate_q4"] > best_gate:
+                best_gate = ev["main"]["gate_q4"]
+                save_ckpt(out / "ckpt_best.npz", theta, adam_state, key,
+                          up + 1, config)
+                print(f"  new best gate_q4={best_gate:.3f} -> ckpt_best.npz")
             if (stop_gate is not None and ev["main"]["gate_q4"] >= stop_gate
                     and (not stop_slope_pos or ev["main"]["slope"] > 0)):
                 save_ckpt(out / "ckpt.npz", theta, adam_state, key, up + 1, config)
